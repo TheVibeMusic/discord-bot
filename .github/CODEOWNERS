@@ -1,0 +1,6 @@
+# Every change to any file requires review from the repository owner.
+# Combined with the `main` ruleset (require pull request + require review
+# from Code Owners), this means no PR merges to main without @eviltyromancer's
+# approval — including PRs that try to edit this file, since GitHub evaluates
+# CODEOWNERS from the base branch.
+* @eviltyromancer
