@@ -377,14 +377,17 @@ class Birthdays(commands.Cog):
                 self._download_suno_mp3(interaction.guild_id, interaction.user.id, url)
             )
 
+        # Public so the community sees new submissions land — it's the whole
+        # point of the feature being an engagement thing.
         text = (
-            f"Your submission has been updated to **{title.strip()}** — "
-            "it's in the birthday rotation!"
+            f"{interaction.user.mention} updated their birthday song to "
+            f"**{title.strip()}** — it's in the rotation! \N{MUSICAL NOTE}"
             if replacing
-            else f"**{title.strip()}** is in the birthday rotation — "
-            "you'll get credit when it plays. \N{MUSICAL NOTE}"
+            else f"{interaction.user.mention} added **{title.strip()}** to the "
+            "birthday rotation — they'll get credit when it plays. "
+            "\N{MUSICAL NOTE}"
         )
-        await interaction.response.send_message(text, ephemeral=True)
+        await interaction.response.send_message(text)
 
     async def _download_suno_mp3(self, guild_id: int, user_id: int, url: str) -> None:
         """Fetch the mp3 behind a Suno song link and store it locally.
