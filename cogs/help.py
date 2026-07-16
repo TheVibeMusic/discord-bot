@@ -45,6 +45,9 @@ $milestone <number> <url> - set pic for counting milestones (optional)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
 $bdsongs – list community-submitted birthday songs with their ID numbers
 $removebdsong <ID> – remove a submitted song that breaks the rules
+$bdaycard <image url> – add a greeting card to the rotation (Imgur direct link, ends in .png/.jpg/.gif)
+$bdaycards – list the cards in the rotation with their ID numbers
+$removebdcard <ID> – remove a card from the rotation
 
   Resources (admin)
 $addresource [Name](url) - add link to the /resources list

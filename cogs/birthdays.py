@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import random
 import re
 from pathlib import Path
 
@@ -31,8 +32,14 @@ WISH_BUTTON_ID = "viibr_bday_wish"
 ANNOUNCE_TIME = datetime.time(hour=14, minute=0, tzinfo=datetime.timezone.utc)
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "ASSETS" / "birthday tracker"
-CARD_IMAGE = ASSETS_DIR / "birthday-message.png"
+CARD_IMAGE = ASSETS_DIR / "birthday-message.png"  # fallback when no cards are configured
 SONGS_DIR = ASSETS_DIR / "mp3s"
+
+# Admins add extra greeting cards by URL ($bdaycard). Host the image somewhere
+# with a stable direct link — Imgur (i.imgur.com/...png) is a good bet, or any
+# image already uploaded to Discord. Cards rotate randomly per birthday; if
+# none are configured the built-in card image is used.
+CARD_URL_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 # Community song submissions.
 MAX_SONG_SUBMISSIONS = 25
@@ -188,6 +195,18 @@ class Birthdays(commands.Cog):
                 user_id BIGINT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY unique_wish (message_id, user_id)
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_bday_cards (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                url VARCHAR(500) NOT NULL,
+                added_by BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_guild (guild_id)
             )
             """
         )
@@ -455,6 +474,85 @@ class Birthdays(commands.Cog):
             embed=embeds.success(f"Birthday announcements will post in {channel.mention}.")
         )
 
+    @commands.command(name="bdaycard")
+    @admin_only()
+    async def add_bday_card(self, ctx: commands.Context, url: str) -> None:
+        """Add a greeting card image to the birthday rotation, by URL."""
+        url = url.strip("<>")
+        if not url.startswith(("http://", "https://")):
+            await ctx.send(
+                embed=embeds.error(
+                    "That doesn't look like a link. Upload the card to Imgur "
+                    "(or any channel here) and paste the direct image URL — "
+                    "it should end in .png, .jpg, or .gif."
+                )
+            )
+            return
+        if not url.lower().split("?")[0].endswith(CARD_URL_SUFFIXES):
+            await ctx.send(
+                embed=embeds.error(
+                    "That link doesn't point straight at an image. On Imgur, "
+                    "right-click the image and copy the *image* address — it "
+                    "looks like `https://i.imgur.com/abc123.png`, not "
+                    "`https://imgur.com/gallery/...`."
+                )
+            )
+            return
+
+        await self.db.execute(
+            "INSERT INTO vibe_bday_cards (guild_id, url, added_by) VALUES (%s, %s, %s)",
+            (ctx.guild.id, url, ctx.author.id),
+        )
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS c FROM vibe_bday_cards WHERE guild_id = %s",
+            (ctx.guild.id,),
+        )
+        count = row["c"] if row else 1
+        embed = embeds.success(
+            f"Card added — **{count}** in the rotation. One is picked at random "
+            "for each birthday."
+        )
+        embed.set_image(url=url)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="bdaycards")
+    @admin_only()
+    async def list_bday_cards(self, ctx: commands.Context) -> None:
+        """List the birthday cards in the rotation, with their ids."""
+        rows = await self.db.fetchall(
+            "SELECT id, url, added_by FROM vibe_bday_cards WHERE guild_id = %s ORDER BY id",
+            (ctx.guild.id,),
+        )
+        if not rows:
+            await ctx.send(
+                embed=embeds.info(
+                    "Birthday cards",
+                    "No cards added yet — the built-in card is used for every "
+                    "birthday. Add more with `$bdaycard <image url>`.",
+                )
+            )
+            return
+        lines = [
+            f"`#{row['id']}` [card]({row['url']}) — added by <@{row['added_by']}>"
+            for row in rows
+        ]
+        await ctx.send(
+            embed=embeds.info(f"Birthday cards ({len(rows)})", "\n".join(lines))
+        )
+
+    @commands.command(name="removebdcard")
+    @admin_only()
+    async def remove_bday_card(self, ctx: commands.Context, card_id: int) -> None:
+        """Remove a birthday card from the rotation by its id."""
+        removed = await self.db.execute(
+            "DELETE FROM vibe_bday_cards WHERE guild_id = %s AND id = %s",
+            (ctx.guild.id, card_id),
+        )
+        if removed:
+            await ctx.send(embed=embeds.success(f"Removed card #{card_id}."))
+        else:
+            await ctx.send(embed=embeds.error(f"No card #{card_id} found."))
+
     # -- Wishes button -----------------------------------------------------------
 
     async def record_wish(self, interaction: discord.Interaction) -> None:
@@ -517,17 +615,27 @@ class Birthdays(commands.Cog):
     async def _send_greeting(
         self, channel: discord.TextChannel, row: dict, today: datetime.date
     ) -> None:
-        """Send the premade card and the day's song for one birthday.
+        """Send a greeting card and the day's song for one birthday.
 
-        The song rotation is the local mp3 assets plus community submissions,
-        indexed by day of year. Local picks are attached as files; community
-        picks are posted as links with credit to the member who made them.
+        Cards added with $bdaycard rotate at random; with none configured the
+        built-in card image is attached instead. The song rotation is the local
+        mp3 assets plus community submissions, indexed by day of year — local
+        picks are attached as files, community picks are posted as links with
+        credit to the member who made them.
         """
         who = f"<@{row['user_id']}>" if row["user_id"] else f"**{row['name']}**"
         content = f"\N{BIRTHDAY CAKE} Happy Birthday {who}!"
 
         files = []
-        if CARD_IMAGE.is_file():
+        embed = None
+        cards = await self.db.fetchall(
+            "SELECT url FROM vibe_bday_cards WHERE guild_id = %s",
+            (channel.guild.id,),
+        )
+        if cards:
+            embed = discord.Embed(color=embeds.BLUE)
+            embed.set_image(url=random.choice(cards)["url"])
+        elif CARD_IMAGE.is_file():
             files.append(discord.File(CARD_IMAGE))
         else:
             log.warning("Birthday card image not found at %s", CARD_IMAGE)
@@ -563,6 +671,7 @@ class Birthdays(commands.Cog):
         try:
             await channel.send(
                 content=content,
+                embed=embed,
                 files=files,
                 view=BirthdayWishView(),
             )
