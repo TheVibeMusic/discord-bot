@@ -89,13 +89,13 @@ class Resources(commands.Cog):
         )
         if not rows:
             await interaction.response.send_message(
-                "No resources have been added yet.", ephemeral=True
+                "No resources have been added yet."
             )
             return
 
         lines = [f"[{row['name']}]({row['url']})" for row in rows]
         embed = embeds.info("Server Resources", "\n".join(lines))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
     # -- Admin commands -----------------------------------------------------------
 

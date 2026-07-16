@@ -412,8 +412,11 @@ class Tickets(commands.Cog):
                     f"**Closed by:** {closer} ({closer.id})",
                 )
                 await log_channel.send(embed=embed, file=file)
-        except Exception:
+        except Exception as exc:
             log.exception("Failed to post transcript for channel %s", channel.id)
+            await self.bot.report_error(
+                f"Failed to post the ticket transcript for #{channel.name}", str(exc)
+            )
 
         await self.db.execute(
             "UPDATE vibe_tickets SET status = 'closed', "

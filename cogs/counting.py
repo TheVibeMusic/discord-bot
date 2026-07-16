@@ -304,8 +304,10 @@ class Counting(commands.Cog):
             embed.set_image(url=row["media_url"])
         try:
             await message.channel.send(embed=embed)
-        except discord.HTTPException:
-            log.exception("Failed to send milestone message in %s", message.channel.id)
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to send a counting milestone in #{message.channel}", str(exc)
+            )
 
 
 async def setup(bot: commands.Bot) -> None:

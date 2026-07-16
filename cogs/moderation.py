@@ -212,8 +212,10 @@ class Moderation(commands.Cog):
             )
         try:
             await log_channel.send(embed=embed)
-        except discord.HTTPException:
-            log.exception("Failed to write deletion log in guild %s", message.guild.id)
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to write the deletion log in {message.guild.name}", str(exc)
+            )
 
 
 async def setup(bot: commands.Bot) -> None:

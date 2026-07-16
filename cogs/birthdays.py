@@ -69,6 +69,42 @@ SONGS_FULL_MESSAGE = (
 )
 
 
+async def _cog_missing(interaction: discord.Interaction) -> None:
+    """A component fired but the cog is gone — that's a bug, not user error.
+
+    The user gets a brief private notice; details go to the error channel.
+    """
+    await interaction.response.send_message(
+        "Something's broken on our end — staff has been notified.",
+        ephemeral=True,
+    )
+    reporter = getattr(interaction.client, "report_error", None)
+    if reporter is not None:
+        await reporter("Birthdays cog missing when a component was used")
+
+
+class WishModal(discord.ui.Modal, title="Send birthday wishes"):
+    """Collects a birthday message, which is posted publicly in the channel."""
+
+    message = discord.ui.TextInput(
+        label="Your birthday message",
+        placeholder="Happy birthday! Hope you have an amazing day!",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+    )
+
+    def __init__(self, celebrant: str) -> None:
+        super().__init__()
+        self.celebrant = celebrant
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("Birthdays")
+        if cog is None:
+            await _cog_missing(interaction)
+            return
+        await cog.post_wish(interaction, self.celebrant, str(self.message))
+
+
 class BirthdayWishView(discord.ui.View):
     """Persistent view holding the 'Send birthday wishes' button."""
 
@@ -86,11 +122,23 @@ class BirthdayWishView(discord.ui.View):
     ) -> None:
         cog = interaction.client.get_cog("Birthdays")
         if cog is None:
+            await _cog_missing(interaction)
+            return
+        # One wish per person per birthday — check before opening the modal.
+        already = await cog.db.fetchone(
+            "SELECT 1 FROM vibe_bday_wishes WHERE message_id = %s AND user_id = %s",
+            (interaction.message.id, interaction.user.id),
+        )
+        if already:
             await interaction.response.send_message(
-                "Birthdays are unavailable right now.", ephemeral=True
+                "You've already sent your birthday wishes for this one!",
+                ephemeral=True,
             )
             return
-        await cog.record_wish(interaction)
+        # The celebrant is whoever the prompt names — pull it back out of the
+        # message so the wish can address them.
+        celebrant = cog.celebrant_from_message(interaction.message)
+        await interaction.response.send_modal(WishModal(celebrant))
 
 
 class SongSubmitModal(discord.ui.Modal, title="Submit your birthday song"):
@@ -110,9 +158,7 @@ class SongSubmitModal(discord.ui.Modal, title="Submit your birthday song"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         cog = interaction.client.get_cog("Birthdays")
         if cog is None:
-            await interaction.response.send_message(
-                "Birthdays are unavailable right now.", ephemeral=True
-            )
+            await _cog_missing(interaction)
             return
         await cog.save_song_submission(
             interaction, str(self.song_title), str(self.song_url)
@@ -135,9 +181,7 @@ class SongMenuView(discord.ui.View):
     ) -> None:
         cog = interaction.client.get_cog("Birthdays")
         if cog is None:
-            await interaction.response.send_message(
-                "Birthdays are unavailable right now.", ephemeral=True
-            )
+            await _cog_missing(interaction)
             return
         if await cog.submissions_full(interaction.guild_id, interaction.user.id):
             await interaction.response.send_message(
@@ -225,6 +269,16 @@ class Birthdays(commands.Cog):
             """
         )
 
+        # Add the wish-channel column to existing installs. Plain ALTER inside
+        # try/except so it works on both MariaDB and MySQL 8 (no IF NOT EXISTS
+        # support for columns on the latter).
+        try:
+            await self.db.execute(
+                "ALTER TABLE vibe_bday_config ADD COLUMN wish_channel_id BIGINT NULL"
+            )
+        except Exception:
+            pass  # column already exists
+
         self.bot.add_view(BirthdayWishView())
         if not self.announce_birthdays.is_running():
             self.announce_birthdays.start()
@@ -275,8 +329,7 @@ class Birthdays(commands.Cog):
         )
         if not rows:
             await interaction.response.send_message(
-                "No birthdays on the calendar yet. Add yours with /addmybd!",
-                ephemeral=True,
+                "No birthdays on the calendar yet. Add yours with /addmybd!"
             )
             return
 
@@ -302,7 +355,7 @@ class Birthdays(commands.Cog):
             lines.append(f"{when} — {who} ({note})")
 
         embed = embeds.info("Upcoming birthdays", "\n".join(lines))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
     # -- Community song submissions ----------------------------------------------
 
@@ -425,8 +478,13 @@ class Birthdays(commands.Cog):
                 "WHERE guild_id = %s AND user_id = %s",
                 (filename, guild_id, user_id),
             )
-        except Exception:
+        except Exception as exc:
             log.exception("Failed to download Suno mp3 for %s", url)
+            await self.bot.report_error(
+                f"Suno mp3 download failed for a song submission ({url}) — "
+                "birthdays will fall back to posting the link",
+                str(exc),
+            )
 
     @commands.command(name="bdsongs")
     @admin_only()
@@ -475,6 +533,22 @@ class Birthdays(commands.Cog):
         )
         await ctx.send(
             embed=embeds.success(f"Birthday announcements will post in {channel.mention}.")
+        )
+
+    @commands.command(name="wishchannel")
+    @admin_only()
+    async def wish_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        """Set the channel where the 'send wishes' button prompt is posted."""
+        await self.db.execute(
+            "INSERT INTO vibe_bday_config (guild_id, wish_channel_id) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE wish_channel_id = VALUES(wish_channel_id)",
+            (ctx.guild.id, channel.id),
+        )
+        await ctx.send(
+            embed=embeds.success(
+                f"The birthday wishes button will post in {channel.mention}. "
+                "Wishes themselves still appear in the announcement channel."
+            )
         )
 
     @commands.command(name="bdaycard")
@@ -558,8 +632,21 @@ class Birthdays(commands.Cog):
 
     # -- Wishes button -----------------------------------------------------------
 
-    async def record_wish(self, interaction: discord.Interaction) -> None:
-        """Record one wish per member per announcement and update the count."""
+    @staticmethod
+    def celebrant_from_message(message: discord.Message) -> str:
+        """Pull the celebrated member's mention (or name) out of the prompt."""
+        match = re.search(r"<@!?\d+>", message.content)
+        if match:
+            return match.group(0)
+        match = re.search(r"\*\*(.+?)\*\*", message.content)
+        if match:
+            return f"**{match.group(1)}**"
+        return "the birthday star"
+
+    async def post_wish(
+        self, interaction: discord.Interaction, celebrant: str, message: str
+    ) -> None:
+        """Record the wish and post it publicly in the announcement channel."""
         try:
             await self.db.execute(
                 "INSERT INTO vibe_bday_wishes (message_id, user_id) VALUES (%s, %s)",
@@ -572,22 +659,35 @@ class Birthdays(commands.Cog):
             )
             return
 
-        row = await self.db.fetchone(
-            "SELECT COUNT(*) AS c FROM vibe_bday_wishes WHERE message_id = %s",
-            (interaction.message.id,),
+        config_row = await self.db.fetchone(
+            "SELECT channel_id FROM vibe_bday_config WHERE guild_id = %s",
+            (interaction.guild_id,),
         )
-        count = row["c"] if row else 1
+        announce_channel = None
+        if config_row and config_row["channel_id"]:
+            announce_channel = interaction.guild.get_channel(config_row["channel_id"])
+        if announce_channel is None:
+            announce_channel = interaction.channel
 
+        wish_text = (
+            f"\N{BIRTHDAY CAKE} Birthday wishes for {celebrant} "
+            f"from {interaction.user.mention}:\n>>> {message}"
+        )
         try:
-            await interaction.message.edit(
-                content=f"{interaction.message.content.splitlines()[0]}\n"
-                f"\N{PARTY POPPER} **{count}** birthday wish(es) from the community!"
+            await announce_channel.send(wish_text)
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to post a birthday wish in #{announce_channel}", str(exc)
             )
-        except (discord.HTTPException, IndexError):
-            pass
+            await interaction.response.send_message(
+                "Couldn't post your wish — staff has been notified.", ephemeral=True
+            )
+            return
 
         await interaction.response.send_message(
-            "Your birthday wishes have been added. \N{BIRTHDAY CAKE}", ephemeral=True
+            f"Your birthday wishes are posted in {announce_channel.mention}! "
+            "\N{BIRTHDAY CAKE}",
+            ephemeral=True,
         )
 
     # -- Daily announcement task ---------------------------------------------------
@@ -596,7 +696,7 @@ class Birthdays(commands.Cog):
     async def announce_birthdays(self) -> None:
         today = datetime.date.today()
         configs = await self.db.fetchall(
-            "SELECT guild_id, channel_id FROM vibe_bday_config "
+            "SELECT guild_id, channel_id, wish_channel_id FROM vibe_bday_config "
             "WHERE channel_id IS NOT NULL"
         )
         for config_row in configs:
@@ -607,18 +707,32 @@ class Birthdays(commands.Cog):
             if not isinstance(channel, discord.TextChannel):
                 continue
 
+            wish_channel = None
+            if config_row.get("wish_channel_id"):
+                wish_channel = guild.get_channel(config_row["wish_channel_id"])
+            if wish_channel is None:
+                wish_channel = channel
+
             rows = await self.db.fetchall(
                 "SELECT * FROM vibe_birthdays "
                 "WHERE guild_id = %s AND month = %s AND day = %s",
                 (guild.id, today.month, today.day),
             )
             for row in rows:
-                await self._send_greeting(channel, row, today)
+                await self._send_greeting(channel, wish_channel, row, today)
 
     async def _send_greeting(
-        self, channel: discord.TextChannel, row: dict, today: datetime.date
+        self,
+        channel: discord.TextChannel,
+        wish_channel: discord.TextChannel,
+        row: dict,
+        today: datetime.date,
     ) -> None:
         """Send a greeting card and the day's song for one birthday.
+
+        The announcement (card + song) goes to the announcement channel; the
+        'send wishes' button goes to the wish channel (usually bot commands)
+        as its own prompt, and wishes post back into the announcement channel.
 
         Cards added with $bdaycard rotate at random; with none configured the
         built-in card image is attached instead. The song rotation is the local
@@ -672,14 +786,29 @@ class Birthdays(commands.Cog):
                     content += f"{credit}\n{pick['url']}"
 
         try:
-            await channel.send(
-                content=content,
-                embed=embed,
-                files=files,
-                view=BirthdayWishView(),
+            await channel.send(content=content, embed=embed, files=files)
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to send a birthday greeting in #{channel}", str(exc)
             )
-        except discord.HTTPException:
-            log.exception("Failed to send birthday greeting in %s", channel.id)
+            return
+
+        # The wishes button lives in its own prompt (usually in bot commands),
+        # so the announcement channel stays clean. The prompt names the
+        # celebrant so wishes can address them; no ping on this message.
+        try:
+            await wish_channel.send(
+                content=(
+                    f"\N{BIRTHDAY CAKE} It's {who}'s birthday! Press the button "
+                    "to send them birthday wishes."
+                ),
+                view=BirthdayWishView(),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to send the wish-button prompt in #{wish_channel}", str(exc)
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
