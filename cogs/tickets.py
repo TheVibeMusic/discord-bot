@@ -415,7 +415,9 @@ class Tickets(commands.Cog):
         except Exception as exc:
             log.exception("Failed to post transcript for channel %s", channel.id)
             await self.bot.report_error(
-                f"Failed to post the ticket transcript for #{channel.name}", str(exc)
+                f"Failed to post the ticket transcript for #{channel.name}",
+                str(exc),
+                guild=channel.guild,
             )
 
         await self.db.execute(

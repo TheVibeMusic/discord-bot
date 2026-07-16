@@ -26,6 +26,7 @@ Members help menu accessed with the command /help
 $help/$viibr (admin/mod) - this menu
 $delete <#> - (admin) bulk delete # amount of messages up to 100
 $setlog <channel ID> (admin) - sets deleted msgs accountability channel
+$errorchannel <channel ID> (admin) - sets where bot error reports post
 $sync – sync slash commands
 
  Tickets Setup (admin)

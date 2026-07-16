@@ -306,7 +306,9 @@ class Counting(commands.Cog):
             await message.channel.send(embed=embed)
         except discord.HTTPException as exc:
             await self.bot.report_error(
-                f"Failed to send a counting milestone in #{message.channel}", str(exc)
+                f"Failed to send a counting milestone in #{message.channel}",
+                str(exc),
+                guild=message.guild,
             )
 
 

@@ -80,11 +80,20 @@ class Moderation(commands.Cog):
             CREATE TABLE IF NOT EXISTS vibe_mod_config (
                 guild_id BIGINT PRIMARY KEY,
                 deletion_log_channel_id BIGINT NULL,
+                error_channel_id BIGINT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP
             )
             """
         )
+        # Add the error-channel column to existing installs. Plain ALTER in
+        # try/except so it works on both MariaDB and MySQL 8.
+        try:
+            await self.db.execute(
+                "ALTER TABLE vibe_mod_config ADD COLUMN error_channel_id BIGINT NULL"
+            )
+        except Exception:
+            pass  # column already exists
 
     async def _log_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         row = await self.db.fetchone(
@@ -109,6 +118,20 @@ class Moderation(commands.Cog):
             (ctx.guild.id, channel.id),
         )
         await ctx.send(embed=embeds.success(f"Deletion log set to {channel.mention}."))
+
+    @commands.command(name="errorchannel")
+    @admin_only()
+    async def set_error_channel(
+        self, ctx: commands.Context, channel: discord.TextChannel
+    ) -> None:
+        """Set the channel where bot error reports are posted."""
+        await self.db.execute(
+            "INSERT INTO vibe_mod_config (guild_id, error_channel_id) "
+            "VALUES (%s, %s) ON DUPLICATE KEY UPDATE "
+            "error_channel_id = VALUES(error_channel_id)",
+            (ctx.guild.id, channel.id),
+        )
+        await ctx.send(embed=embeds.success(f"Bot errors will report to {channel.mention}."))
 
     @commands.command(name="delete")
     @admin_only()
@@ -214,7 +237,9 @@ class Moderation(commands.Cog):
             await log_channel.send(embed=embed)
         except discord.HTTPException as exc:
             await self.bot.report_error(
-                f"Failed to write the deletion log in {message.guild.name}", str(exc)
+                f"Failed to write the deletion log in {message.guild.name}",
+                str(exc),
+                guild=message.guild,
             )
 
 

@@ -484,6 +484,7 @@ class Birthdays(commands.Cog):
                 f"Suno mp3 download failed for a song submission ({url}) — "
                 "birthdays will fall back to posting the link",
                 str(exc),
+                guild=self.bot.get_guild(guild_id),
             )
 
     @commands.command(name="bdsongs")
@@ -677,7 +678,9 @@ class Birthdays(commands.Cog):
             await announce_channel.send(wish_text)
         except discord.HTTPException as exc:
             await self.bot.report_error(
-                f"Failed to post a birthday wish in #{announce_channel}", str(exc)
+                f"Failed to post a birthday wish in #{announce_channel}",
+                str(exc),
+                guild=interaction.guild,
             )
             await interaction.response.send_message(
                 "Couldn't post your wish — staff has been notified.", ephemeral=True
@@ -789,7 +792,9 @@ class Birthdays(commands.Cog):
             await channel.send(content=content, embed=embed, files=files)
         except discord.HTTPException as exc:
             await self.bot.report_error(
-                f"Failed to send a birthday greeting in #{channel}", str(exc)
+                f"Failed to send a birthday greeting in #{channel}",
+                str(exc),
+                guild=channel.guild,
             )
             return
 
@@ -807,7 +812,9 @@ class Birthdays(commands.Cog):
             )
         except discord.HTTPException as exc:
             await self.bot.report_error(
-                f"Failed to send the wish-button prompt in #{wish_channel}", str(exc)
+                f"Failed to send the wish-button prompt in #{wish_channel}",
+                str(exc),
+                guild=wish_channel.guild,
             )
 
 
