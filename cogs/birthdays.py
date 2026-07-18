@@ -674,8 +674,18 @@ class Birthdays(commands.Cog):
             f"\N{BIRTHDAY CAKE} Birthday wishes for {celebrant} "
             f"from {interaction.user.mention}:\n>>> {message}"
         )
+        # The wish body is member-supplied, so restrict pings to the celebrant
+        # only — no @everyone/@here/role/user injection through wish text.
+        celebrant_id_match = re.search(r"\d{15,}", celebrant)
+        allowed = discord.AllowedMentions(
+            everyone=False,
+            roles=False,
+            users=[discord.Object(id=int(celebrant_id_match.group(0)))]
+            if celebrant_id_match
+            else False,
+        )
         try:
-            await announce_channel.send(wish_text)
+            await announce_channel.send(wish_text, allowed_mentions=allowed)
         except discord.HTTPException as exc:
             await self.bot.report_error(
                 f"Failed to post a birthday wish in #{announce_channel}",
