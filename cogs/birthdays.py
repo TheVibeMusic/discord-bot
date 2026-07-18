@@ -374,8 +374,10 @@ class Birthdays(commands.Cog):
         Suno song pages load their audio via JavaScript, so the raw HTML only
         contains a silent placeholder (``sil-100.mp3``). Instead we resolve the
         share link to its canonical ``/song/<uuid>`` URL and download the audio
-        straight from ``cdn1.suno.ai/<uuid>.mp3``. Downloads smaller than a real
-        song are rejected so the placeholder can never slip through.
+        from ``cdn<n>.suno.ai/<uuid>.mp3``, trying each CDN host in turn in
+        case songs aren't always served from the same one. Downloads smaller
+        than a real song are rejected so the placeholder can never slip
+        through.
 
         On success the submission row is updated with the file name; on any
         failure the row keeps local_file NULL and birthdays fall back to
@@ -398,21 +400,26 @@ class Birthdays(commands.Cog):
                     log.info("No Suno song UUID found for %s", url)
                     return
 
-                audio_url = f"https://cdn1.suno.ai/{match.group(0)}.mp3"
-                async with session.get(audio_url) as resp:
-                    if resp.status != 200:
-                        return
-                    if "audio" not in resp.headers.get("Content-Type", ""):
-                        log.info("Suno URL returned non-audio for %s", url)
-                        return
-                    if int(resp.headers.get("Content-Length") or 0) > MAX_DOWNLOAD_BYTES:
-                        log.info("Suno mp3 too large to attach for %s", url)
-                        return
-                    data = await resp.read()
+                data = None
+                for cdn in ("cdn1", "cdn2", "cdn3"):
+                    audio_url = f"https://{cdn}.suno.ai/{match.group(0)}.mp3"
+                    async with session.get(audio_url) as resp:
+                        if resp.status != 200:
+                            continue
+                        if "audio" not in resp.headers.get("Content-Type", ""):
+                            continue
+                        if int(resp.headers.get("Content-Length") or 0) > MAX_DOWNLOAD_BYTES:
+                            log.info("Suno mp3 too large to attach for %s", url)
+                            return
+                        candidate = await resp.read()
+                    # Reject the silent placeholder (~5 KB) and error bodies;
+                    # try the next CDN if this one didn't have the real song.
+                    if MIN_SONG_BYTES <= len(candidate) <= MAX_DOWNLOAD_BYTES:
+                        data = candidate
+                        break
 
-            # Guard against the silent placeholder (~5 KB) and error pages.
-            if not (MIN_SONG_BYTES <= len(data) <= MAX_DOWNLOAD_BYTES):
-                log.info("Suno download for %s was %d bytes — skipping", url, len(data))
+            if data is None:
+                log.info("No Suno CDN served a valid mp3 for %s", url)
                 return
             COMMUNITY_SONGS_DIR.mkdir(exist_ok=True)
             dest.write_bytes(data)
