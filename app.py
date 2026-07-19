@@ -59,6 +59,44 @@ class VibeBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (ID: %s)", self.user, getattr(self.user, "id", "?"))
 
+    async def report_error(
+        self,
+        context: str,
+        detail: str = "",
+        guild: discord.Guild | None = None,
+    ) -> None:
+        """Post an error report to the error channel.
+
+        Uses the guild's configured channel ($errorchannel) when one is set,
+        falling back to the ERROR_CHANNEL_ID environment default. Logs only if
+        neither resolves — error reporting must never itself raise.
+        """
+        log.error("%s %s", context, detail)
+
+        channel = None
+        if guild is not None:
+            try:
+                row = await self.db.fetchone(
+                    "SELECT error_channel_id FROM vibe_mod_config WHERE guild_id = %s",
+                    (guild.id,),
+                )
+                if row and row["error_channel_id"]:
+                    channel = guild.get_channel(row["error_channel_id"])
+            except Exception:
+                log.exception("Failed to look up the error channel")
+        if channel is None:
+            channel = self.get_channel(config.ERROR_CHANNEL_ID)
+        if channel is None:
+            return
+
+        text = f"\N{WARNING SIGN} **Bot error:** {context}"
+        if detail:
+            text += f"\n```\n{detail[:1500]}\n```"
+        try:
+            await channel.send(text)
+        except discord.HTTPException:
+            log.exception("Failed to deliver error report")
+
     async def close(self) -> None:
         await self.db.close()
         await super().close()

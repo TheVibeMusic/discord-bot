@@ -26,6 +26,7 @@ Members help menu accessed with the command /help
 $help/$viibr (admin/mod) - this menu
 $delete <#> - (admin) bulk delete # amount of messages up to 100
 $setlog <channel ID> (admin) - sets deleted msgs accountability channel
+$errorchannel <channel ID> (admin) - sets where bot error reports post
 $sync – sync slash commands
 
  Tickets Setup (admin)
@@ -43,8 +44,12 @@ $milestone <number> <url> - set pic for counting milestones (optional)
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
+$wishchannel <channelID> - set the channel where the send-wishes button posts (wishes themselves go to the announcement channel)
 $bdsongs – list community-submitted birthday songs with their ID numbers
 $removebdsong <ID> – remove a submitted song that breaks the rules
+$bdaycard <image url> – add a greeting card to the rotation (Imgur direct link, ends in .png/.jpg/.gif)
+$bdaycards – list the cards in the rotation with their ID numbers
+$removebdcard <ID> – remove a card from the rotation
 
   Resources (admin)
 $addresource [Name](url) - add link to the /resources list
@@ -118,7 +123,6 @@ class Help(commands.Cog):
         embed.set_footer(text="More features are on the way!")
         await interaction.response.send_message(
             embed=embed,
-            ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

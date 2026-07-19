@@ -35,3 +35,6 @@ MOD_ROLE_ID: int = _get_int("MOD_ROLE_ID")
 MANAGER_IDS: set[int] = _get_int_set("MANAGER_IDS")
 ADMIN_IDS: set[int] = _get_int_set("ADMIN_IDS")
 MOD_IDS: set[int] = _get_int_set("MOD_IDS")
+
+# Channel that receives bot error reports (overridable via env).
+ERROR_CHANNEL_ID: int = _get_int("ERROR_CHANNEL_ID", 1523742065450815528)
