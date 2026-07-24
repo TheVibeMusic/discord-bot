@@ -2,12 +2,14 @@
 
 `$delete <n>` purges the last n messages in the current channel. `$setlog`
 configures a channel where deletions are recorded: single deleted messages
-are logged with their author and content, and bulk purges are logged as one
-summary entry (the individual purged messages are not logged separately).
+are logged with their author, content, and whoever removed them, and bulk
+purges are logged as one summary entry (the individual purged messages are
+not logged separately).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -21,6 +23,11 @@ log = logging.getLogger("vibe.moderation")
 PURGE_LIMIT = 100
 CONTENT_TRUNCATE = 800
 CONFIRM_TIMEOUT_SECONDS = 30
+
+# Discord writes the audit entry a moment after the delete event arrives, so
+# the lookup waits briefly before reading it.
+AUDIT_LOOKUP_DELAY_SECONDS = 1.5
+AUDIT_LOOKUP_LIMIT = 5
 
 
 class ConfirmDeleteView(discord.ui.View):
@@ -69,6 +76,11 @@ class Moderation(commands.Cog):
         # Message ids removed via $delete, so the deletion listener can skip
         # them (the purge is logged once as a summary instead).
         self._purged_ids: set[int] = set()
+        # Last audit entry seen per guild, as {guild_id: (entry_id, count)}.
+        # Discord reuses one message_delete entry for repeated deletions by
+        # the same moderator, bumping its count instead of adding a new entry,
+        # so a match only counts as fresh when the id or the count changed.
+        self._audit_cursor: dict[int, tuple[int, int]] = {}
 
     @property
     def db(self):
@@ -202,6 +214,53 @@ class Moderation(commands.Cog):
         if len(self._purged_ids) > 2000:
             self._purged_ids.clear()
 
+    # -- Deleter lookup ------------------------------------------------------
+
+    async def _find_deleter(self, message: discord.Message) -> discord.abc.User | None:
+        """Return the moderator who removed a message, or None for self-deletes.
+
+        A message delete event carries no actor, so the guild audit log is the
+        only source. Discord makes no audit entry when a member deletes their
+        own message, so "no matching entry" means the author removed it.
+        Requires the View Audit Log permission.
+        """
+        await asyncio.sleep(AUDIT_LOOKUP_DELAY_SECONDS)
+        try:
+            entries = [
+                entry
+                async for entry in message.guild.audit_logs(
+                    limit=AUDIT_LOOKUP_LIMIT,
+                    action=discord.AuditLogAction.message_delete,
+                )
+            ]
+        except discord.Forbidden:
+            log.info(
+                "No View Audit Log permission in %s — deletion log can't name "
+                "who deleted messages.",
+                message.guild.name,
+            )
+            return None
+        except discord.HTTPException:
+            return None
+
+        seen = self._audit_cursor.get(message.guild.id)
+        for entry in entries:
+            if entry.target is None or entry.target.id != message.author.id:
+                continue
+            if getattr(entry.extra, "channel", None) != message.channel:
+                continue
+            # Only fresh activity counts: a brand new entry, or an existing
+            # one whose count just went up.
+            if seen is not None and entry.id == seen[0] and entry.count <= seen[1]:
+                continue
+            self._audit_cursor[message.guild.id] = (entry.id, entry.count)
+            return entry.user
+
+        if entries:
+            newest = entries[0]
+            self._audit_cursor[message.guild.id] = (newest.id, newest.count)
+        return None
+
     # -- Listener ------------------------------------------------------------
 
     @commands.Cog.listener()
@@ -221,9 +280,16 @@ class Moderation(commands.Cog):
         if len(content) > CONTENT_TRUNCATE:
             content = content[:CONTENT_TRUNCATE] + "…"
 
+        deleter = await self._find_deleter(message)
+        if deleter is None:
+            removed_by = f"{message.author.mention} (deleted their own message)"
+        else:
+            removed_by = f"{deleter.mention} ({deleter})"
+
         embed = embeds.info(
             "Message deleted",
             f"**Author:** {message.author.mention} ({message.author})\n"
+            f"**Deleted by:** {removed_by}\n"
             f"**Channel:** {message.channel.mention}\n"
             f"**Content:** {content}",
         )
