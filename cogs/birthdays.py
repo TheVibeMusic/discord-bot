@@ -31,6 +31,12 @@ WISH_BUTTON_ID = "viibr_bday_wish"
 # Announcement time: 14:00 UTC (9 AM Central / 10 AM Eastern).
 ANNOUNCE_TIME = datetime.time(hour=14, minute=0, tzinfo=datetime.timezone.utc)
 
+# The wish-button prompt is pinned so it stays reachable all day, then
+# unpinned automatically. The sweep runs often enough that a pin never
+# outlives the birthday by more than a few minutes.
+WISH_PIN_HOURS = 24
+PIN_SWEEP_MINUTES = 10
+
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "ASSETS" / "birthday tracker"
 CARD_IMAGE = ASSETS_DIR / "birthday-message.png"  # fallback when no cards are configured
 SONGS_DIR = ASSETS_DIR / "mp3s"
@@ -270,6 +276,17 @@ class Birthdays(commands.Cog):
             """
         )
 
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_bday_pins (
+                message_id BIGINT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                channel_id BIGINT NOT NULL,
+                unpin_at DATETIME NOT NULL
+            )
+            """
+        )
+
         # Add the wish-channel column to existing installs. Plain ALTER inside
         # try/except so it works on both MariaDB and MySQL 8 (no IF NOT EXISTS
         # support for columns on the latter).
@@ -283,9 +300,12 @@ class Birthdays(commands.Cog):
         self.bot.add_view(BirthdayWishView())
         if not self.announce_birthdays.is_running():
             self.announce_birthdays.start()
+        if not self.sweep_expired_pins.is_running():
+            self.sweep_expired_pins.start()
 
     async def cog_unload(self) -> None:
         self.announce_birthdays.cancel()
+        self.sweep_expired_pins.cancel()
 
     # -- Member slash commands -------------------------------------------------
 
@@ -837,7 +857,7 @@ class Birthdays(commands.Cog):
         # so the announcement channel stays clean. The prompt names the
         # celebrant so wishes can address them; no ping on this message.
         try:
-            await wish_channel.send(
+            prompt = await wish_channel.send(
                 content=(
                     f"\N{BIRTHDAY CAKE} It's {who}'s birthday! Press the button "
                     "to send them birthday wishes."
@@ -851,6 +871,81 @@ class Birthdays(commands.Cog):
                 str(exc),
                 guild=wish_channel.guild,
             )
+            return
+
+        await self._pin_for_a_day(prompt)
+
+    # -- Wish-button pinning -------------------------------------------------------
+
+    async def _pin_for_a_day(self, message: discord.Message) -> None:
+        """Pin the wish prompt and record when it should come back down.
+
+        The expiry lives in the database rather than in a sleeping task, so a
+        bot restart can't leave a pin stranded in the channel forever.
+        """
+        try:
+            await message.pin(reason="Birthday wishes button")
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to pin the wish prompt in #{message.channel}",
+                str(exc),
+                guild=message.guild,
+            )
+            return
+
+        unpin_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=WISH_PIN_HOURS
+        )
+        await self.db.execute(
+            "INSERT INTO vibe_bday_pins (message_id, guild_id, channel_id, unpin_at) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE unpin_at = VALUES(unpin_at)",
+            (
+                message.id,
+                message.guild.id,
+                message.channel.id,
+                unpin_at.replace(tzinfo=None),
+            ),
+        )
+
+    @tasks.loop(minutes=PIN_SWEEP_MINUTES)
+    async def sweep_expired_pins(self) -> None:
+        """Unpin wish prompts whose 24 hours are up."""
+        rows = await self.db.fetchall(
+            "SELECT message_id, guild_id, channel_id FROM vibe_bday_pins "
+            "WHERE unpin_at <= UTC_TIMESTAMP()"
+        )
+        for row in rows:
+            guild = self.bot.get_guild(row["guild_id"])
+            channel = guild.get_channel(row["channel_id"]) if guild else None
+            if isinstance(channel, discord.TextChannel):
+                try:
+                    message = await channel.fetch_message(row["message_id"])
+                    await message.unpin(reason="Birthday wishes window closed")
+                except discord.NotFound:
+                    pass  # message or pin is already gone
+                except discord.HTTPException as exc:
+                    log.warning("Could not unpin %s: %s", row["message_id"], exc)
+                    continue  # leave the row so the next sweep retries
+            await self.db.execute(
+                "DELETE FROM vibe_bday_pins WHERE message_id = %s", (row["message_id"],)
+            )
+
+    @sweep_expired_pins.before_loop
+    async def _before_sweep(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Remove Discord's 'pinned a message' notice for our own pins."""
+        if (
+            message.type is discord.MessageType.pins_add
+            and message.author.id == self.bot.user.id
+        ):
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
 
 
 async def setup(bot: commands.Bot) -> None:
