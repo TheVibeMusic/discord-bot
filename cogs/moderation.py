@@ -10,6 +10,7 @@ not logged separately).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 
 import discord
@@ -28,6 +29,12 @@ CONFIRM_TIMEOUT_SECONDS = 30
 # the lookup waits briefly before reading it.
 AUDIT_LOOKUP_DELAY_SECONDS = 1.5
 AUDIT_LOOKUP_LIMIT = 5
+
+# A genuine moderator deletion is logged within a couple of seconds of the
+# event. Anything older is stale (e.g. an entry left over from before a
+# restart) and must not be matched to a fresh self-delete, which creates no
+# audit entry of its own.
+AUDIT_MAX_AGE_SECONDS = 15
 
 
 class ConfirmDeleteView(discord.ui.View):
@@ -244,18 +251,29 @@ class Moderation(commands.Cog):
             return None
 
         seen = self._audit_cursor.get(message.guild.id)
+        now = datetime.datetime.now(datetime.timezone.utc)
         for entry in entries:
             if entry.target is None or entry.target.id != message.author.id:
                 continue
             if getattr(entry.extra, "channel", None) != message.channel:
                 continue
-            # Only fresh activity counts: a brand new entry, or an existing
-            # one whose count just went up.
+            # Reject stale entries. After a restart the cursor is empty, so a
+            # self-delete (which logs nothing) could otherwise be matched to an
+            # older moderator deletion of this same author in this same channel
+            # and wrongly attributed to that moderator. A real deletion is
+            # logged within a second or two of the event.
+            if (now - entry.created_at).total_seconds() > AUDIT_MAX_AGE_SECONDS:
+                continue
+            # Within that fresh window, the cursor still separates a brand new
+            # deletion from a repeat that only bumped an existing entry's count
+            # (Discord reuses one entry for rapid same-moderator deletions).
             if seen is not None and entry.id == seen[0] and entry.count <= seen[1]:
                 continue
             self._audit_cursor[message.guild.id] = (entry.id, entry.count)
             return entry.user
 
+        # Prime the cursor to the newest entry even on a self-delete, so the
+        # baseline is set for the next lookup in this guild.
         if entries:
             newest = entries[0]
             self._audit_cursor[message.guild.id] = (newest.id, newest.count)
