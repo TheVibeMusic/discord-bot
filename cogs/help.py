@@ -39,8 +39,10 @@ $close (admin/mods) - close the ticket in the current channel
 
   Counting (admin)
 $countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
-$startgame - starts/restarts counting
-$milestone <number> <url> - set pic for counting milestones (optional)
+$startgame - starts/restarts counting (or $startgame <number> to pick up an existing count, e.g. $startgame 4127)
+$milestone <number> <url> - add a pic/prize to any number (built-in milestones are 100/200/500/1000s; setting a pic on any other number makes it fire too; add several to one number = random pick each time)
+$milestones - list milestone pics with their ID numbers
+$removemilestone <ID> - remove a milestone pic from the rotation
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
@@ -73,15 +75,17 @@ MEMBER_COMMANDS = (
     "`/addmybd` — add your birthday to the server calendar\n"
     "`/removemybd` — take your birthday off the calendar\n"
     "`/calendar` — see upcoming birthdays\n"
-    "`/birthdaysong` — submit a birthday song you made to the rotation"
+    "`/birthdaysong` — submit a birthday song you made to the rotation\n"
+    "`/countboard` — counting game leaderboard and your rank"
 )
 
 MEMBER_COUNTING = (
     "Join the counting game in the counting channel — post the next number, "
     "one per person. \N{HIGH VOLTAGE SIGN} means you got it, and big numbers "
-    "get a celebration. No counting twice in a row — you get one warning, "
-    "then the count resets to zero. And no chatting in there: messages "
-    "without the number get removed."
+    "get a celebration. Miss a number and you can hit **Double or Nothing** "
+    "for a chance to undo it — or double the damage. No counting twice in a "
+    "row — you get one warning, then the count resets to zero. And no chatting "
+    "in there: messages without the number get removed."
 )
 
 MEMBER_REPORT = (
