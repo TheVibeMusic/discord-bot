@@ -142,14 +142,22 @@ class Resources(commands.Cog):
             )
             return
         name, url = parsed
-        updated = await self.db.execute(
+        # Check the row exists before updating rather than reading it off the
+        # rowcount: an UPDATE affects zero rows when the new URL matches the
+        # stored one, which would report a resource that plainly exists as
+        # missing.
+        existing = await self.db.fetchone(
+            "SELECT 1 FROM vibe_resources WHERE guild_id = %s AND name = %s",
+            (ctx.guild.id, name),
+        )
+        if existing is None:
+            await ctx.send(embed=embeds.error(f"No resource named **{name}** found."))
+            return
+        await self.db.execute(
             "UPDATE vibe_resources SET url = %s WHERE guild_id = %s AND name = %s",
             (url, ctx.guild.id, name),
         )
-        if updated:
-            await ctx.send(embed=embeds.success(f"Updated the link for **{name}**."))
-        else:
-            await ctx.send(embed=embeds.error(f"No resource named **{name}** found."))
+        await ctx.send(embed=embeds.success(f"Updated the link for **{name}**."))
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -31,6 +31,14 @@ from discord.ext import commands
 import config
 from utils import embeds
 from utils.permissions import admin_only
+from utils.urls import is_direct_image_url
+
+# Shown when an admin passes something that isn't a usable image link.
+BAD_IMAGE_URL = (
+    "That doesn't point straight at an image. Paste a direct link ending in "
+    ".png, .jpg, .gif, or .webp — on Imgur, right-click the image and copy "
+    "the *image* address (`https://i.imgur.com/abc123.png`), not the page URL."
+)
 
 log = logging.getLogger("vibe.counting")
 
@@ -524,6 +532,11 @@ class Counting(commands.Cog):
         if number < 1:
             await ctx.send(embed=embeds.error("Milestone number must be positive."))
             return
+        # Discord wraps a link in <> when someone suppresses its preview.
+        url = url.strip("<>")
+        if not is_direct_image_url(url):
+            await ctx.send(embed=embeds.error(BAD_IMAGE_URL))
+            return
         await self.db.execute(
             "INSERT INTO vibe_counting_milestones (guild_id, number, media_url) "
             "VALUES (%s, %s, %s)",
@@ -562,6 +575,11 @@ class Counting(commands.Cog):
         Roasts are images only — the bot adds no text of its own. One is picked
         at random from the pool, and only some of the time (see $roastchance).
         """
+        # Discord wraps a link in <> when someone suppresses its preview.
+        url = url.strip("<>")
+        if not is_direct_image_url(url):
+            await ctx.send(embed=embeds.error(BAD_IMAGE_URL))
+            return
         await self.db.execute(
             "INSERT INTO vibe_counting_roasts (guild_id, media_url, added_by) "
             "VALUES (%s, %s, %s)",
@@ -628,11 +646,10 @@ class Counting(commands.Cog):
         if not 0 <= percent <= 100:
             await ctx.send(embed=embeds.error("Pick a percentage between 0 and 100."))
             return
-        updated = await self.db.execute(
-            "UPDATE vibe_counting SET roast_chance = %s WHERE guild_id = %s",
-            (percent, ctx.guild.id),
-        )
-        if not updated:
+        # Check the row exists before updating: an UPDATE reports zero affected
+        # rows when the value is already what was asked for, which would
+        # otherwise be misread as "no counting channel".
+        if await self._get_game(ctx.guild.id) is None:
             await ctx.send(
                 embed=embeds.error(
                     "No counting channel is set yet. Run `$countingeasy` or "
@@ -640,6 +657,10 @@ class Counting(commands.Cog):
                 )
             )
             return
+        await self.db.execute(
+            "UPDATE vibe_counting SET roast_chance = %s WHERE guild_id = %s",
+            (percent, ctx.guild.id),
+        )
         if percent == 0:
             await ctx.send(
                 embed=embeds.success(
@@ -664,11 +685,9 @@ class Counting(commands.Cog):
         if not 1 <= percent <= 100:
             await ctx.send(embed=embeds.error("Pick a percentage between 1 and 100."))
             return
-        updated = await self.db.execute(
-            "UPDATE vibe_counting SET prize_chance = %s WHERE guild_id = %s",
-            (percent, ctx.guild.id),
-        )
-        if not updated:
+        # See $roastchance: an unchanged UPDATE affects zero rows, so existence
+        # is checked separately rather than inferred from the rowcount.
+        if await self._get_game(ctx.guild.id) is None:
             await ctx.send(
                 embed=embeds.error(
                     "No counting channel is set yet. Run `$countingeasy` or "
@@ -676,6 +695,10 @@ class Counting(commands.Cog):
                 )
             )
             return
+        await self.db.execute(
+            "UPDATE vibe_counting SET prize_chance = %s WHERE guild_id = %s",
+            (percent, ctx.guild.id),
+        )
         await ctx.send(
             embed=embeds.success(
                 f"Prize numbers now fire **{percent}%** of the times they're "
