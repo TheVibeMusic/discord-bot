@@ -38,3 +38,14 @@ MOD_IDS: set[int] = _get_int_set("MOD_IDS")
 
 # Channel that receives bot error reports (overridable via env).
 ERROR_CHANNEL_ID: int = _get_int("ERROR_CHANNEL_ID", 1523742065450815528)
+
+# Channels where anyone may use slash commands. Threads under these channels
+# count too. Leaving this unset disables the restriction entirely, so a missing
+# value can never lock the whole server out of the bot.
+COMMAND_CHANNEL_IDS: set[int] = _get_int_set("COMMAND_CHANNEL_IDS")
+
+# Users who may use slash commands anywhere, for testing and debugging. The
+# server owner is always included so a bad config can't lock them out.
+COMMAND_EXEMPT_IDS: set[int] = _get_int_set("COMMAND_EXEMPT_IDS") | (
+    {OWNER_ID} if OWNER_ID else set()
+)

@@ -23,6 +23,7 @@ from pymysql.err import IntegrityError
 
 from utils import embeds
 from utils.permissions import admin_only
+from utils.urls import is_direct_image_url, is_http_url
 
 log = logging.getLogger("vibe.birthdays")
 
@@ -44,8 +45,8 @@ SONGS_DIR = ASSETS_DIR / "mp3s"
 # Admins add extra greeting cards by URL ($bdaycard). Host the image somewhere
 # with a stable direct link — Imgur (i.imgur.com/...png) is a good bet, or any
 # image already uploaded to Discord. Cards rotate randomly per birthday; if
-# none are configured the built-in card image is used.
-CARD_URL_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+# none are configured the built-in card image is used. The link itself is
+# validated by utils.urls, shared with $milestone and $roast.
 
 # Community song submissions.
 MAX_SONG_SUBMISSIONS = 25
@@ -602,7 +603,7 @@ class Birthdays(commands.Cog):
     async def add_bday_card(self, ctx: commands.Context, url: str) -> None:
         """Add a greeting card image to the birthday rotation, by URL."""
         url = url.strip("<>")
-        if not url.startswith(("http://", "https://")):
+        if not is_http_url(url):
             await ctx.send(
                 embed=embeds.error(
                     "That doesn't look like a link. Upload the card to Imgur "
@@ -611,7 +612,7 @@ class Birthdays(commands.Cog):
                 )
             )
             return
-        if not url.lower().split("?")[0].endswith(CARD_URL_SUFFIXES):
+        if not is_direct_image_url(url):
             await ctx.send(
                 embed=embeds.error(
                     "That link doesn't point straight at an image. On Imgur, "

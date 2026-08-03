@@ -6,6 +6,7 @@ import logging
 import os
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -31,6 +32,49 @@ INITIAL_EXTENSIONS = [
 ]
 
 
+def allowed_channel(interaction: discord.Interaction) -> bool:
+    """Whether this interaction may run where it was invoked.
+
+    Slash commands are confined to COMMAND_CHANNEL_IDS so they don't clutter
+    conversation channels. Threads inherit their parent channel's permission,
+    and the exempt users may run commands anywhere. With no channels
+    configured the restriction is off, so a missing environment value can
+    never make the bot look broken server-wide.
+    """
+    if not config.COMMAND_CHANNEL_IDS:
+        return True
+    if interaction.user.id in config.COMMAND_EXEMPT_IDS:
+        return True
+    if interaction.channel_id in config.COMMAND_CHANNEL_IDS:
+        return True
+    parent_id = getattr(interaction.channel, "parent_id", None)
+    return parent_id in config.COMMAND_CHANNEL_IDS
+
+
+class VibeCommandTree(app_commands.CommandTree):
+    """Command tree that keeps slash commands in their designated channels."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if allowed_channel(interaction):
+            return True
+
+        where = ", ".join(f"<#{cid}>" for cid in sorted(config.COMMAND_CHANNEL_IDS))
+        await interaction.response.send_message(
+            f"Bot commands are used in {where}. Head over there and try again.",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        # A failed interaction_check already told the user where to go; logging
+        # it as an unhandled error would just be noise.
+        if isinstance(error, app_commands.CheckFailure):
+            return
+        await super().on_error(interaction, error)
+
+
 class VibeBot(commands.Bot):
     """The Viibr bot client."""
 
@@ -42,6 +86,7 @@ class VibeBot(commands.Bot):
             command_prefix=config.PREFIX,
             intents=intents,
             help_command=None,
+            tree_cls=VibeCommandTree,
         )
         self.db = Database()
 

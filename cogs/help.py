@@ -40,9 +40,16 @@ $close (admin/mods) - close the ticket in the current channel
   Counting (admin)
 $countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
 $startgame - starts/restarts counting (or $startgame <number> to pick up an existing count, e.g. $startgame 4127)
-$milestone <number> <url> - add a pic/prize to any number (built-in milestones are 100/200/500/1000s; setting a pic on any other number makes it fire too; add several to one number = random pick each time)
+$milestone <number> <url> - add a pic/prize to any number (add several to one number = random pick each time)
+   ・ 100/200/500 and every 1000 are permanent - they always fire
+   ・ any other number is a prize - it only fires part of the time, so it stays a surprise
+$milestonechance <percent> - how often prize numbers fire (default 10%)
 $milestones - list milestone pics with their ID numbers
 $removemilestone <ID> - remove a milestone pic from the rotation
+$roast <image url> - add a roast pic, posted sometimes when someone miscounts (images only)
+$roasts - list roast pics with their ID numbers
+$removeroast <ID> - remove a roast pic
+$roastchance <percent> - how often a miscount gets roasted (default 25%, 0 turns it off)
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
