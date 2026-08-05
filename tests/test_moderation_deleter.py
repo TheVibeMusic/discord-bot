@@ -17,6 +17,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from cogs import moderation
+from utils import audit
 
 
 # --------------------------------------------------------------------------- #
@@ -24,12 +25,16 @@ from cogs import moderation
 # --------------------------------------------------------------------------- #
 @pytest.fixture(autouse=True)
 def _skip_audit_delay(monkeypatch):
-    """Never actually wait the 1.5s audit-settle delay during tests."""
+    """Never actually wait the 1.5s audit-settle delay during tests.
+
+    The delay lives in utils.audit, which Moderation._find_deleter delegates
+    to; these tests still drive it through the cog so the wrapper is covered.
+    """
 
     async def _instant(_seconds):
         return None
 
-    monkeypatch.setattr(moderation.asyncio, "sleep", _instant)
+    monkeypatch.setattr(audit.asyncio, "sleep", _instant)
 
 
 def make_cog() -> moderation.Moderation:

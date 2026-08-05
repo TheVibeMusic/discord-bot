@@ -20,6 +20,7 @@ stat or trivia line.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import random
 import re
@@ -30,6 +31,7 @@ from discord.ext import commands
 
 import config
 from utils import embeds
+from utils.audit import audit_log_readable, find_message_deleter
 from utils.permissions import admin_only
 from utils.urls import is_direct_image_url
 
@@ -70,6 +72,19 @@ DEFAULT_PRIZE_CHANCE = 10  # percent, tunable per guild with $milestonechance
 # fired on every miss would read as piling on rather than teasing.
 DEFAULT_ROAST_CHANCE = 25  # percent, tunable per guild with $roastchance
 
+# Deleting your own count is disruptive rather than rude: the next counter
+# reads the channel, sees the wrong last number, and takes the penalty for
+# somebody else's deletion. Deleting a message is deliberate, so there is no
+# warning step — the first offence is already a block, and it escalates from
+# there. Every offence also posts a shaming image.
+#
+# Minutes per offence; None means the block never lifts.
+BLOCK_LADDER: tuple[int | None, ...] = (
+    120,    # first offence  — two hours
+    1440,   # second offence — a day
+    None,   # third onward   — permanent
+)
+
 NUMBER_RE = re.compile(r"-?\d+")
 
 # Random chaos dropped into reset messages alongside the real stats, so a
@@ -87,6 +102,18 @@ TRIVIA_FACTS = (
     "Fun fact: 111,111,111 x 111,111,111 = 12,345,678,987,654,321.",
     "Fun fact: the number four is the only one whose letters equal its value.",
 )
+
+
+def only_ping(user_id: int) -> discord.AllowedMentions:
+    """Allow pinging exactly one member and nothing else.
+
+    ``AllowedMentions(users=[...])`` leaves everyone and roles at their
+    defaults, which permit those pings. Every call-site here addresses one
+    person, so the rest are turned off explicitly.
+    """
+    return discord.AllowedMentions(
+        everyone=False, roles=False, users=[discord.Object(id=user_id)]
+    )
 
 
 def is_permanent_milestone(number: int) -> bool:
@@ -201,6 +228,13 @@ class Counting(commands.Cog):
         # never hits the database — a number fires a celebration if it's a
         # built-in milestone OR someone set a custom image ("prize") for it.
         self._milestone_numbers: dict[int, set[int]] = {}
+        # Messages this cog deleted itself (the no-chat rule), so the deletion
+        # listener doesn't mistake its own housekeeping for a member deleting
+        # their count.
+        self._bot_deleted: set[int] = set()
+        # Last audit entry seen per guild, for utils.audit. Separate from the
+        # moderation cog's cursor: each reader tracks its own position.
+        self._audit_cursor: dict[int, tuple[int, int]] = {}
 
     @property
     def db(self):
@@ -245,6 +279,38 @@ class Counting(commands.Cog):
                 user_id BIGINT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY unique_warning (guild_id, user_id)
+            )
+            """
+        )
+
+        # Strikes and blocks for members who delete their own counts. A row
+        # survives the block expiring so the strike count is remembered, which
+        # is what drives the escalation.
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_counting_blocks (
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                strikes INT NOT NULL DEFAULT 0,
+                blocked_until DATETIME NULL,
+                permanent BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
+
+        # Shaming images, posted when someone is caught deleting a count.
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_counting_shames (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                media_url VARCHAR(500) NOT NULL,
+                added_by BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_guild (guild_id)
             )
             """
         )
@@ -299,6 +365,13 @@ class Counting(commands.Cog):
             await self.db.execute(
                 "ALTER TABLE vibe_counting ADD COLUMN roast_chance INT NOT NULL "
                 f"DEFAULT {DEFAULT_ROAST_CHANCE}"
+            )
+        except Exception:
+            pass  # column already exists
+        try:
+            await self.db.execute(
+                "ALTER TABLE vibe_counting_blocks ADD COLUMN permanent BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
             )
         except Exception:
             pass  # column already exists
@@ -419,9 +492,7 @@ class Counting(commands.Cog):
                 "on that miss. Win and it never happened; lose and the penalty "
                 f"doubles. ({GAMBLE_WINDOW_SECONDS}s)",
                 view=view,
-                allowed_mentions=discord.AllowedMentions(
-                    users=[discord.Object(id=message.author.id)]
-                ),
+                allowed_mentions=only_ping(message.author.id),
             )
         except discord.HTTPException:
             pass
@@ -675,6 +746,122 @@ class Counting(commands.Cog):
             )
         )
 
+    @commands.command(name="shame")
+    @admin_only()
+    async def add_shame(self, ctx: commands.Context, url: str) -> None:
+        """Add an image posted when someone is caught deleting their count.
+
+        Images only — the bot adds no text of its own beyond the block notice.
+        """
+        url = url.strip("<>")
+        if not is_direct_image_url(url):
+            await ctx.send(embed=embeds.error(BAD_IMAGE_URL))
+            return
+        await self.db.execute(
+            "INSERT INTO vibe_counting_shames (guild_id, media_url, added_by) "
+            "VALUES (%s, %s, %s)",
+            (ctx.guild.id, url, ctx.author.id),
+        )
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS c FROM vibe_counting_shames WHERE guild_id = %s",
+            (ctx.guild.id,),
+        )
+        total = row["c"] if row else 1
+        await ctx.send(
+            embed=embeds.success(
+                f"Added a shaming image. The pool has **{total}** now, and one "
+                "is posted every time somebody deletes their count."
+            )
+        )
+
+    @commands.command(name="shames")
+    @admin_only()
+    async def list_shames(self, ctx: commands.Context) -> None:
+        """List the shaming images with their ID numbers (for removal)."""
+        rows = await self.db.fetchall(
+            "SELECT id, media_url FROM vibe_counting_shames WHERE guild_id = %s "
+            "ORDER BY id",
+            (ctx.guild.id,),
+        )
+        if not rows:
+            await ctx.send(
+                embed=embeds.info(
+                    "Shaming images",
+                    "None yet. Add one with `$shame <image url>`.",
+                )
+            )
+            return
+        lines = [f"ID `{row['id']}` — {row['media_url']}" for row in rows]
+        await ctx.send(embed=embeds.info("Shaming images", "\n".join(lines)))
+
+    @commands.command(name="removeshame")
+    @admin_only()
+    async def remove_shame(self, ctx: commands.Context, shame_id: int) -> None:
+        """Remove one shaming image by its ID (see $shames)."""
+        removed = await self.db.execute(
+            "DELETE FROM vibe_counting_shames WHERE guild_id = %s AND id = %s",
+            (ctx.guild.id, shame_id),
+        )
+        if removed:
+            await ctx.send(embed=embeds.success(f"Removed shaming image `{shame_id}`."))
+        else:
+            await ctx.send(embed=embeds.error(f"No shaming image with ID `{shame_id}`."))
+
+    @commands.command(name="countunblock")
+    @admin_only()
+    async def unblock_counter(self, ctx: commands.Context, member: discord.Member) -> None:
+        """Lift someone's counting block and clear their strikes."""
+        removed = await self.db.execute(
+            "DELETE FROM vibe_counting_blocks WHERE guild_id = %s AND user_id = %s",
+            (ctx.guild.id, member.id),
+        )
+        if removed:
+            await ctx.send(
+                embed=embeds.success(
+                    f"{member.display_name} can count again, with a clean slate."
+                )
+            )
+        else:
+            await ctx.send(
+                embed=embeds.info(
+                    "Nothing to lift",
+                    f"{member.display_name} has no strikes or blocks on record.",
+                )
+            )
+
+    @commands.command(name="countblocks")
+    @admin_only()
+    async def list_blocks(self, ctx: commands.Context) -> None:
+        """Show who has strikes or an active block."""
+        rows = await self.db.fetchall(
+            "SELECT user_id, strikes, blocked_until, permanent "
+            "FROM vibe_counting_blocks WHERE guild_id = %s "
+            "ORDER BY strikes DESC, user_id",
+            (ctx.guild.id,),
+        )
+        if not rows:
+            await ctx.send(
+                embed=embeds.info("Counting blocks", "Nobody has strikes on record.")
+            )
+            return
+
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        lines = []
+        for row in rows:
+            member = ctx.guild.get_member(row["user_id"])
+            name = member.display_name if member else f"User {row['user_id']}"
+            until = row["blocked_until"]
+            if row["permanent"]:
+                state = "blocked permanently"
+            elif until is not None and until > now:
+                stamp = int(until.replace(tzinfo=datetime.timezone.utc).timestamp())
+                state = f"blocked until <t:{stamp}:R>"
+            else:
+                state = "block served"
+            lines.append(f"**{name}** — {row['strikes']} strike(s), {state}")
+        lines.append("\nClear someone with `$countunblock @member`.")
+        await ctx.send(embed=embeds.info("Counting blocks", "\n".join(lines)))
+
     @commands.command(name="milestonechance")
     @admin_only()
     async def set_prize_chance(self, ctx: commands.Context, percent: int) -> None:
@@ -835,10 +1022,37 @@ class Counting(commands.Cog):
         if game is None or not game["active"]:
             return
 
+        # Members serving a block for deleting their counts can't play. Their
+        # message goes, the count doesn't move, and no penalty is recorded.
+        blocked, until = await self._block_state(message.guild.id, message.author.id)
+        if blocked:
+            self._bot_deleted.add(message.id)
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            if until is None:
+                when = "for good"
+            else:
+                stamp = int(
+                    until.replace(tzinfo=datetime.timezone.utc).timestamp()
+                )
+                when = f"until <t:{stamp}:R>"
+            notice = await message.channel.send(
+                f"{message.author.mention} you're out of the counting game {when}.",
+                allowed_mentions=only_ping(message.author.id),
+            )
+            try:
+                await notice.delete(delay=8)
+            except discord.HTTPException:
+                pass
+            return
+
         # No chatting: a message must contain a number to stay. Words are
         # fine as long as the number is in there somewhere.
         match = NUMBER_RE.search(message.content)
         if match is None:
+            self._bot_deleted.add(message.id)
             try:
                 await message.delete()
             except discord.HTTPException:
@@ -953,6 +1167,133 @@ class Counting(commands.Cog):
         if row is None or row.get("prize_chance") is None:
             return DEFAULT_PRIZE_CHANCE
         return row["prize_chance"]
+
+    # -- Deleting your own count -------------------------------------------------
+
+    async def _block_state(self, guild_id: int, user_id: int):
+        """(blocked, until) for a member. `until` is None on a permanent block."""
+        row = await self.db.fetchone(
+            "SELECT blocked_until, permanent FROM vibe_counting_blocks "
+            "WHERE guild_id = %s AND user_id = %s "
+            "AND (permanent = TRUE OR blocked_until > UTC_TIMESTAMP())",
+            (guild_id, user_id),
+        )
+        if row is None:
+            return False, None
+        return True, (None if row["permanent"] else row["blocked_until"])
+
+    async def _shame(self, message: discord.Message) -> None:
+        """Post a random shaming image, if any are configured. Images only."""
+        rows = await self.db.fetchall(
+            "SELECT media_url FROM vibe_counting_shames WHERE guild_id = %s",
+            (message.guild.id,),
+        )
+        if not rows:
+            return
+        embed = discord.Embed(color=embeds.RED)
+        embed.set_image(url=random.choice(rows)["media_url"])
+        try:
+            await message.channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            log.warning("Could not post a shaming image: %s", exc)
+
+    async def _register_deletion(self, message: discord.Message) -> None:
+        """Block the member, escalating with each offence, and shame them.
+
+        Called only once the deletion is known to be the author's own doing.
+        Two hours, then a day, then permanently.
+        """
+        row = await self.db.fetchone(
+            "SELECT strikes FROM vibe_counting_blocks WHERE guild_id = %s AND user_id = %s",
+            (message.guild.id, message.author.id),
+        )
+        strikes = (row["strikes"] if row else 0) + 1
+        minutes = BLOCK_LADDER[min(strikes, len(BLOCK_LADDER)) - 1]
+
+        if minutes is None:
+            await self.db.execute(
+                "INSERT INTO vibe_counting_blocks "
+                "(guild_id, user_id, strikes, blocked_until, permanent) "
+                "VALUES (%s, %s, %s, NULL, TRUE) "
+                "ON DUPLICATE KEY UPDATE strikes = VALUES(strikes), "
+                "blocked_until = NULL, permanent = TRUE",
+                (message.guild.id, message.author.id, strikes),
+            )
+            duration = "**permanently**. That's the third time"
+        else:
+            until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+                minutes=minutes
+            )
+            await self.db.execute(
+                "INSERT INTO vibe_counting_blocks "
+                "(guild_id, user_id, strikes, blocked_until, permanent) "
+                "VALUES (%s, %s, %s, %s, FALSE) "
+                "ON DUPLICATE KEY UPDATE strikes = VALUES(strikes), "
+                "blocked_until = VALUES(blocked_until), permanent = FALSE",
+                (
+                    message.guild.id,
+                    message.author.id,
+                    strikes,
+                    until.replace(tzinfo=None),
+                ),
+            )
+            # A Discord timestamp so everyone sees the end of the block in
+            # their own timezone, counting down on its own.
+            duration = f"until <t:{int(until.timestamp())}:R>"
+
+        await message.channel.send(
+            f"{message.author.mention} deleted their number. You can't count "
+            f"if you can't play fair — you're out of the counting game "
+            f"{duration}.",
+            allowed_mentions=only_ping(message.author.id),
+        )
+        await self._shame(message)
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message) -> None:
+        """Catch members deleting their own counts.
+
+        Ignores the bot's own housekeeping deletions and anything a moderator
+        removed, so only a member deleting their own number counts against
+        them. Without the View Audit Log permission every deletion looks like
+        a self-delete, so the feature stays quiet rather than blaming people
+        at random.
+        """
+        if message.guild is None or message.author.bot:
+            return
+        if self._counting_channels.get(message.guild.id) != message.channel.id:
+            return
+        # The no-chat rule deletes messages itself; those aren't the member's
+        # doing.
+        if message.id in self._bot_deleted:
+            self._bot_deleted.discard(message.id)
+            return
+        if message.author.id in config.COUNTING_EXEMPT_IDS:
+            return
+        if message.content.startswith(config.PREFIX):
+            return
+        # Only messages that were actually a count attempt matter.
+        if NUMBER_RE.search(message.content) is None:
+            return
+
+        game = await self._get_game(message.guild.id)
+        if game is None or not game["active"]:
+            return
+
+        if not await audit_log_readable(message.guild):
+            log.info(
+                "Skipping counting deletion check in %s — no View Audit Log "
+                "permission, so a moderator's deletion can't be told apart "
+                "from a member's.",
+                message.guild.name,
+            )
+            return
+
+        deleter = await find_message_deleter(message, self._audit_cursor)
+        if deleter is not None:
+            return  # a moderator removed it, not the author
+
+        await self._register_deletion(message)
 
     async def _roast_chance(self, guild_id: int) -> int:
         """The guild's roast-fire percentage, falling back to the default."""
