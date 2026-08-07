@@ -49,3 +49,10 @@ COMMAND_CHANNEL_IDS: set[int] = _get_int_set("COMMAND_CHANNEL_IDS")
 COMMAND_EXEMPT_IDS: set[int] = _get_int_set("COMMAND_EXEMPT_IDS") | (
     {OWNER_ID} if OWNER_ID else set()
 )
+
+# Staff and developers who are never blocked from the counting game for
+# deleting their own counts — they delete messages as part of testing and
+# moderating. The server owner is always included.
+COUNTING_EXEMPT_IDS: set[int] = _get_int_set("COUNTING_EXEMPT_IDS") | (
+    {OWNER_ID} if OWNER_ID else set()
+)
