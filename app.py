@@ -143,6 +143,7 @@ class VibeBot(commands.Bot):
             f"`{config.PREFIX}{ctx.command}` failed in #{ctx.channel}",
             f"{type(error).__name__}: {error}",
             guild=ctx.guild,
+            error=error,
         )
 
     async def report_error(
@@ -150,6 +151,7 @@ class VibeBot(commands.Bot):
         context: str,
         detail: str = "",
         guild: discord.Guild | None = None,
+        error: BaseException | None = None,
     ) -> None:
         """Post an error report to the error channel.
 
@@ -157,7 +159,9 @@ class VibeBot(commands.Bot):
         falling back to the ERROR_CHANNEL_ID environment default. Logs only if
         neither resolves — error reporting must never itself raise.
         """
-        log.error("%s %s", context, detail)
+        # exc_info keeps the stack trace in the log; without it an overridden
+        # error handler loses the traceback discord.py would have printed.
+        log.error("%s %s", context, detail, exc_info=error)
 
         channel = None
         if guild is not None:
