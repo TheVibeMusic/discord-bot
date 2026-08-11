@@ -104,11 +104,54 @@ class VibeBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (ID: %s)", self.user, getattr(self.user, "id", "?"))
 
+    async def on_command_error(
+        self, ctx: commands.Context, error: commands.CommandError
+    ) -> None:
+        """Say something when a prefix command fails.
+
+        Without this, discord.py logs the failure and the channel sees nothing
+        at all, so a permission problem, a missing argument and an outright
+        crash are indistinguishable from the bot ignoring you.
+        """
+        error = getattr(error, "original", error)
+
+        if isinstance(error, commands.CommandNotFound):
+            return  # someone typed $whatever; staying quiet is right
+
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send("That command is staff only.")
+            return
+
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(
+                f"`{config.PREFIX}{ctx.command}` needs another value — "
+                f"`{ctx.command.signature}`."
+            )
+            return
+
+        if isinstance(error, (commands.BadArgument, commands.ArgumentParsingError)):
+            await ctx.send(
+                f"That doesn't look right for `{config.PREFIX}{ctx.command}` — "
+                f"expected `{ctx.command.signature}`."
+            )
+            return
+
+        # Anything else is a bug. Tell the channel briefly, and send the
+        # details somewhere staff will actually see them.
+        await ctx.send("Something went wrong running that — staff have been notified.")
+        await self.report_error(
+            f"`{config.PREFIX}{ctx.command}` failed in #{ctx.channel}",
+            f"{type(error).__name__}: {error}",
+            guild=ctx.guild,
+            error=error,
+        )
+
     async def report_error(
         self,
         context: str,
         detail: str = "",
         guild: discord.Guild | None = None,
+        error: BaseException | None = None,
     ) -> None:
         """Post an error report to the error channel.
 
@@ -116,7 +159,9 @@ class VibeBot(commands.Bot):
         falling back to the ERROR_CHANNEL_ID environment default. Logs only if
         neither resolves — error reporting must never itself raise.
         """
-        log.error("%s %s", context, detail)
+        # exc_info keeps the stack trace in the log; without it an overridden
+        # error handler loses the traceback discord.py would have printed.
+        log.error("%s %s", context, detail, exc_info=error)
 
         channel = None
         if guild is not None:
