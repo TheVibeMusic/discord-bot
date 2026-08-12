@@ -68,11 +68,39 @@ class VibeCommandTree(app_commands.CommandTree):
     async def on_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
+        """Tell the user a slash command failed, and report it to staff.
+
+        The default only writes a log line, so the member is left staring at
+        "The application did not respond" while nothing reaches the error
+        channel. This mirrors what on_command_error does for $ commands.
+        """
         # A failed interaction_check already told the user where to go; logging
         # it as an unhandled error would just be noise.
         if isinstance(error, app_commands.CheckFailure):
             return
-        await super().on_error(interaction, error)
+
+        original = getattr(error, "original", error)
+
+        # The interaction may already be answered or deferred, which decides
+        # whether a reply goes through response or followup. Either can fail on
+        # its own (a 3-second interaction can expire), so this never raises out
+        # of the error handler.
+        try:
+            notice = "Something went wrong running that — staff have been notified."
+            if interaction.response.is_done():
+                await interaction.followup.send(notice, ephemeral=True)
+            else:
+                await interaction.response.send_message(notice, ephemeral=True)
+        except discord.HTTPException:
+            log.warning("Could not tell the user their slash command failed")
+
+        command = interaction.command.qualified_name if interaction.command else "?"
+        await self.client.report_error(
+            f"`/{command}` failed in #{interaction.channel}",
+            f"{type(original).__name__}: {original}",
+            guild=interaction.guild,
+            error=original,
+        )
 
 
 class VibeBot(commands.Bot):
@@ -87,6 +115,14 @@ class VibeBot(commands.Bot):
             intents=intents,
             help_command=None,
             tree_cls=VibeCommandTree,
+            # Nothing this bot sends should ever ping @everyone or a role by
+            # accident. Member-supplied text reaches messages in several
+            # features, and per-call allowed_mentions is easy to forget, so the
+            # safe setting is the default and the rare exception opts in
+            # (see utils.mentions.only_ping_role).
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True
+            ),
         )
         self.db = Database()
 

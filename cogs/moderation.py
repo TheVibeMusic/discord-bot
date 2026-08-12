@@ -15,7 +15,7 @@ import discord
 from discord.ext import commands
 
 from utils import embeds
-from utils.audit import find_message_deleter
+from utils.audit import UNKNOWN, find_message_deleter
 from utils.permissions import admin_only
 
 log = logging.getLogger("vibe.moderation")
@@ -239,7 +239,11 @@ class Moderation(commands.Cog):
             content = content[:CONTENT_TRUNCATE] + "…"
 
         deleter = await self._find_deleter(message)
-        if deleter is None:
+        if deleter is UNKNOWN:
+            # No audit log access, so a moderator's deletion is indistinguishable
+            # from a self-delete. Say so rather than blaming the author.
+            removed_by = "unknown — I can't read this server's audit log"
+        elif deleter is None:
             removed_by = f"{message.author.mention} (deleted their own message)"
         else:
             removed_by = f"{deleter.mention} ({deleter})"

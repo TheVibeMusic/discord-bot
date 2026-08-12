@@ -19,6 +19,7 @@ import discord
 from discord.ext import commands
 
 from utils import embeds
+from utils.mentions import only_ping_role
 from utils.permissions import admin_only, is_admin, is_mod
 
 log = logging.getLogger("vibe.tickets")
@@ -329,8 +330,13 @@ class Tickets(commands.Cog):
             "Describe what you need and staff will be with you soon.\n"
             "Press **Close Ticket** below when it's resolved.",
         )
+        # The bot disables role pings by default, so this one opts back in:
+        # staff genuinely need to be notified that a ticket opened.
         await channel.send(
-            content=staff_role.mention, embed=embed, view=TicketCloseView()
+            content=staff_role.mention,
+            embed=embed,
+            view=TicketCloseView(),
+            allowed_mentions=only_ping_role(staff_role),
         )
         await interaction.followup.send(
             f"Your ticket is open: {channel.mention}", ephemeral=True
@@ -390,28 +396,45 @@ class Tickets(commands.Cog):
         opener_id: int,
         closer: discord.abc.User,
     ) -> None:
-        """Post the transcript, mark the ticket closed, and delete the channel."""
+        """Post the transcript, mark the ticket closed, and delete the channel.
+
+        The channel is only deleted once the transcript is safely filed. If
+        filing fails — most likely because the configured log channel was
+        deleted or recreated without re-running $ticketlog — the channel stays
+        put so the conversation isn't lost, and staff are told why.
+        """
         cfg = await self._get_config(channel.guild.id)
+        transcript_filed = False
 
         try:
             transcript = await self._build_transcript(channel)
+            log_channel_id = cfg["log_channel_id"] if cfg else None
             log_channel = (
-                channel.guild.get_channel(cfg["log_channel_id"]) if cfg else None
+                channel.guild.get_channel(log_channel_id) if log_channel_id else None
             )
-            if log_channel is not None:
-                opener = channel.guild.get_member(opener_id)
-                opener_label = f"{opener} ({opener_id})" if opener else f"user {opener_id}"
-                file = discord.File(
-                    io.BytesIO(transcript.encode("utf-8")),
-                    filename=f"{channel.name}-transcript.txt",
+            if log_channel is None:
+                # A stored id that no longer resolves is a configuration
+                # problem, not "nothing to do" — raising routes it to the
+                # handler below instead of silently skipping the transcript.
+                raise RuntimeError(
+                    "the transcript log channel is not set or no longer exists; "
+                    "re-run $ticketlog"
                 )
-                embed = embeds.info(
-                    "Ticket closed",
-                    f"**Ticket:** #{channel.name}\n"
-                    f"**Opened by:** {opener_label}\n"
-                    f"**Closed by:** {closer} ({closer.id})",
-                )
-                await log_channel.send(embed=embed, file=file)
+
+            opener = channel.guild.get_member(opener_id)
+            opener_label = f"{opener} ({opener_id})" if opener else f"user {opener_id}"
+            file = discord.File(
+                io.BytesIO(transcript.encode("utf-8")),
+                filename=f"{channel.name}-transcript.txt",
+            )
+            embed = embeds.info(
+                "Ticket closed",
+                f"**Ticket:** #{channel.name}\n"
+                f"**Opened by:** {opener_label}\n"
+                f"**Closed by:** {closer} ({closer.id})",
+            )
+            await log_channel.send(embed=embed, file=file)
+            transcript_filed = True
         except Exception as exc:
             log.exception("Failed to post transcript for channel %s", channel.id)
             await self.bot.report_error(
@@ -426,6 +449,22 @@ class Tickets(commands.Cog):
             "WHERE channel_id = %s",
             (closer.id, channel.id),
         )
+
+        if not transcript_filed:
+            try:
+                await channel.send(
+                    embed=embeds.error(
+                        "The ticket is closed, but the transcript could not be "
+                        "saved, so this channel is being kept rather than "
+                        "deleted — otherwise the conversation would be lost.\n\n"
+                        "Staff: check the transcript log channel is still there "
+                        "and re-run `$ticketlog <channel>`, then delete this "
+                        "channel by hand."
+                    )
+                )
+            except discord.HTTPException:
+                pass
+            return
 
         try:
             await channel.send(

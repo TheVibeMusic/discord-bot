@@ -41,6 +41,14 @@ def make_cog() -> moderation.Moderation:
     return moderation.Moderation(MagicMock())
 
 
+class Channel:
+    """A channel stub. The lookup matches on id, since Discord may hand back a
+    bare Object rather than the real channel."""
+
+    def __init__(self, channel_id: int) -> None:
+        self.id = channel_id
+
+
 def make_message(author_id: int, channel: object, guild_id: int = 1) -> MagicMock:
     message = MagicMock()
     message.author.id = author_id
@@ -93,7 +101,7 @@ def wire_audit_log(message: MagicMock, entries, raise_exc: Exception | None = No
 # --------------------------------------------------------------------------- #
 async def test_fresh_mod_delete_is_attributed_to_the_moderator():
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     mod = object()
     message = make_message(author_id=100, channel=channel)
     wire_audit_log(
@@ -106,7 +114,7 @@ async def test_fresh_mod_delete_is_attributed_to_the_moderator():
 
 async def test_self_delete_with_no_audit_entry_returns_none():
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     message = make_message(author_id=100, channel=channel)
     wire_audit_log(message, [])  # self-deletes are never logged
 
@@ -118,7 +126,7 @@ async def test_stale_entry_after_restart_is_not_blamed_on_the_mod():
     author had an OLDER mod-deletion in the same channel. The stale entry must
     not be attributed to that moderator."""
     cog = make_cog()  # fresh cog => empty audit cursor, as after a restart
-    channel = object()
+    channel = Channel(500)
     mod = object()
     message = make_message(author_id=100, channel=channel)
     wire_audit_log(
@@ -142,7 +150,7 @@ async def test_self_delete_right_after_a_fresh_mod_delete_returns_none():
     the author self-deletes another message in the same channel. The unchanged
     audit entry must not be re-attributed to the mod."""
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     mod = object()
 
     first = make_message(author_id=100, channel=channel)
@@ -164,7 +172,7 @@ async def test_repeated_mod_deletes_bump_count_and_stay_attributed():
     """Discord reuses one entry for rapid same-mod deletions, bumping its
     count. Each bump is a real new deletion and should attribute to the mod."""
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     mod = object()
 
     first = make_message(author_id=100, channel=channel)
@@ -182,19 +190,38 @@ async def test_repeated_mod_deletes_bump_count_and_stay_attributed():
     assert await cog._find_deleter(second) is mod  # count bumped => fresh
 
 
-async def test_missing_view_audit_log_permission_returns_none():
+async def test_missing_view_audit_log_permission_reports_unknown():
+    """UNKNOWN, not None: without the audit log we cannot claim a self-delete."""
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     message = make_message(author_id=100, channel=channel)
     forbidden = discord.Forbidden.__new__(discord.Forbidden)  # no real HTTP response
     wire_audit_log(message, [], raise_exc=forbidden)
 
-    assert await cog._find_deleter(message) is None
+    assert await cog._find_deleter(message) is audit.UNKNOWN
+
+
+async def test_a_bare_object_channel_still_matches():
+    """The bug this replaced: when the channel isn't cached discord.py hands
+    back a plain Object, which never compares equal to the real channel. The
+    moderator's deletion was then reported as the author deleting their own
+    message."""
+    cog = make_cog()
+    channel = Channel(500)
+    uncached = discord.Object(id=500)  # same channel, different type
+    mod = object()
+    message = make_message(author_id=100, channel=channel)
+    wire_audit_log(
+        message,
+        [make_entry(target_id=100, channel=uncached, user=mod, entry_id=1)],
+    )
+
+    assert await cog._find_deleter(message) is mod
 
 
 async def test_entry_for_a_different_user_is_ignored():
     cog = make_cog()
-    channel = object()
+    channel = Channel(500)
     mod = object()
     message = make_message(author_id=100, channel=channel)
     wire_audit_log(
@@ -207,8 +234,8 @@ async def test_entry_for_a_different_user_is_ignored():
 
 async def test_entry_for_a_different_channel_is_ignored():
     cog = make_cog()
-    channel = object()
-    other_channel = object()
+    channel = Channel(500)
+    other_channel = Channel(501)
     mod = object()
     message = make_message(author_id=100, channel=channel)
     wire_audit_log(

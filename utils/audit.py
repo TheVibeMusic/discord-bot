@@ -30,6 +30,19 @@ LOOKUP_LIMIT = 5
 MAX_AGE_SECONDS = 15
 
 
+class _Unknown:
+    """Sentinel for 'the audit log could not be read'."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNKNOWN"
+
+
+# Returned when the lookup itself failed. Distinct from None, which means the
+# audit log was readable and simply had no entry — a genuine self-delete.
+# Callers must not report a self-delete on UNKNOWN; they don't know.
+UNKNOWN = _Unknown()
+
+
 async def find_message_deleter(
     message: discord.Message,
     cursor: dict[int, tuple[int, int]],
@@ -66,16 +79,20 @@ async def find_message_deleter(
             "message.",
             message.guild.name,
         )
-        return None
+        return UNKNOWN
     except discord.HTTPException:
-        return None
+        return UNKNOWN
 
     seen = cursor.get(message.guild.id)
     now = datetime.datetime.now(datetime.timezone.utc)
     for entry in entries:
         if entry.target is None or entry.target.id != message.author.id:
             continue
-        if getattr(entry.extra, "channel", None) != message.channel:
+        # Compare channel ids, not objects: when the channel isn't in cache
+        # discord.py hands back a bare Object, which never compares equal to a
+        # TextChannel even for the same channel.
+        entry_channel = getattr(entry.extra, "channel", None)
+        if getattr(entry_channel, "id", None) != message.channel.id:
             continue
         if (now - entry.created_at).total_seconds() > MAX_AGE_SECONDS:
             continue
@@ -90,20 +107,3 @@ async def find_message_deleter(
         newest = entries[0]
         cursor[message.guild.id] = (newest.id, newest.count)
     return None
-
-
-async def audit_log_readable(guild: discord.Guild) -> bool:
-    """Whether the bot can read this guild's audit log.
-
-    Used before punishing someone for a self-delete: without the permission
-    every deletion looks like a self-delete, so the feature must stay quiet
-    rather than blame people at random.
-    """
-    try:
-        async for _ in guild.audit_logs(limit=1):
-            break
-    except discord.Forbidden:
-        return False
-    except discord.HTTPException:
-        return False
-    return True

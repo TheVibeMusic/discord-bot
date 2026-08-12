@@ -51,8 +51,8 @@ def cog(monkeypatch) -> counting.Counting:
     instance.bot.db.fetchall = AsyncMock(return_value=[])  # no shaming images
     instance._counting_channels = {GUILD: CHANNEL}
 
-    # By default: audit log readable, and nobody else deleted the message.
-    monkeypatch.setattr(counting, "audit_log_readable", AsyncMock(return_value=True))
+    # By default the audit log is readable and shows no other deleter, which
+    # means the author removed their own message.
     monkeypatch.setattr(counting, "find_message_deleter", AsyncMock(return_value=None))
     return instance
 
@@ -205,7 +205,9 @@ async def test_exempt_staff_are_ignored(cog):
 async def test_missing_audit_permission_stays_quiet(cog, monkeypatch):
     """Without the permission every deletion looks like a self-delete, so the
     rule must not blame anyone at random."""
-    monkeypatch.setattr(counting, "audit_log_readable", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        counting, "find_message_deleter", AsyncMock(return_value=counting.UNKNOWN)
+    )
     cog._register_deletion = AsyncMock()
 
     await cog.on_message_delete(make_message())
