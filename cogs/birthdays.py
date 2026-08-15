@@ -22,6 +22,7 @@ from discord.ext import commands, tasks
 from pymysql.err import IntegrityError
 
 from utils import embeds
+from utils.mentions import only_ping
 from utils.permissions import admin_only
 from utils.urls import is_direct_image_url, is_http_url
 
@@ -56,7 +57,13 @@ COMMUNITY_SONGS_DIR = Path(__file__).resolve().parent.parent / "community_songs"
 
 SUNO_PAGE_RE = re.compile(r"https?://(?:www\.)?suno\.com/(?:s|song)/\S+", re.I)
 SUNO_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-MAX_DOWNLOAD_BYTES = 24_000_000  # stay under Discord's attachment limit
+# Discord's upload limit is 10 MiB for an unboosted server and rises with the
+# boost tier, so the real ceiling is read per-guild at send time. This is only
+# the cap on what's worth downloading at all; a file that fits here but not in
+# the destination guild falls back to posting the link.
+MAX_DOWNLOAD_BYTES = 24_000_000
+# Leave room for the greeting card attached to the same message.
+ATTACHMENT_HEADROOM_BYTES = 1_000_000
 MIN_SONG_BYTES = 100_000  # reject Suno's silent placeholder / error pages
 
 SONG_RULES = (
@@ -462,7 +469,11 @@ class Birthdays(commands.Cog):
             "birthday rotation — they'll get credit when it plays. "
             "\N{MUSICAL NOTE}"
         )
-        await interaction.response.send_message(text)
+        # The title is whatever the member typed, so only they may be pinged
+        # by this announcement.
+        await interaction.response.send_message(
+            text, allowed_mentions=only_ping(interaction.user.id)
+        )
 
     async def _download_suno_mp3(self, guild_id: int, user_id: int, url: str) -> None:
         """Fetch the mp3 behind a Suno song link and store it locally.
@@ -549,10 +560,9 @@ class Birthdays(commands.Cog):
             f"`#{row['id']}` [{row['title']}]({row['url']}) — <@{row['user_id']}>"
             for row in rows
         ]
-        embed = embeds.info(
-            f"Community songs ({len(rows)}/{MAX_SONG_SUBMISSIONS})", "\n".join(lines)
-        )
-        await ctx.send(embed=embed)
+        title = f"Community songs ({len(rows)}/{MAX_SONG_SUBMISSIONS})"
+        for page in embeds.paged(title, lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="removebdsong")
     @admin_only()
@@ -660,9 +670,8 @@ class Birthdays(commands.Cog):
             f"`#{row['id']}` [card]({row['url']}) — added by <@{row['added_by']}>"
             for row in rows
         ]
-        await ctx.send(
-            embed=embeds.info(f"Birthday cards ({len(rows)})", "\n".join(lines))
-        )
+        for page in embeds.paged(f"Birthday cards ({len(rows)})", lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="removebdcard")
     @admin_only()
@@ -778,7 +787,17 @@ class Birthdays(commands.Cog):
                 (guild.id, today.month, today.day),
             )
             for row in rows:
-                await self._send_greeting(channel, wish_channel, row, today)
+                # One member's greeting failing must not cancel everyone
+                # else's on the same day.
+                try:
+                    await self._send_greeting(channel, wish_channel, row, today)
+                except Exception as exc:
+                    await self.bot.report_error(
+                        f"Failed to announce a birthday in {guild.name}",
+                        f"{type(exc).__name__}: {exc}",
+                        guild=guild,
+                        error=exc,
+                    )
 
     async def _send_greeting(
         self,
@@ -801,6 +820,9 @@ class Birthdays(commands.Cog):
         """
         who = f"<@{row['user_id']}>" if row["user_id"] else f"**{row['name']}**"
         content = f"\N{BIRTHDAY CAKE} Happy Birthday {who}!"
+        # Only the birthday member, plus whoever wrote the song if one plays,
+        # may be pinged — a song title is member-supplied text.
+        pingable = [row["user_id"]] if row["user_id"] else []
 
         files = []
         embed = None
@@ -829,6 +851,7 @@ class Birthdays(commands.Cog):
                 files.append(discord.File(local_songs[index]))
             else:
                 pick = submissions[index - len(local_songs)]
+                pingable.append(pick["user_id"])
                 credit = (
                     f"\nToday's birthday song: **{pick['title']}** — "
                     f"written by <@{pick['user_id']}>"
@@ -838,14 +861,29 @@ class Birthdays(commands.Cog):
                     if pick["local_file"]
                     else None
                 )
-                if downloaded is not None and downloaded.is_file():
+                # Attaching a file the guild can't accept makes Discord reject
+                # the whole message, which would cancel the greeting, the card
+                # and the wish button for everyone with a birthday today. Too
+                # big just means the song degrades to a link.
+                budget = channel.guild.filesize_limit - ATTACHMENT_HEADROOM_BYTES
+                fits = (
+                    downloaded is not None
+                    and downloaded.is_file()
+                    and downloaded.stat().st_size <= budget
+                )
+                if fits:
                     content += credit
                     files.append(discord.File(downloaded))
                 else:
                     content += f"{credit}\n{pick['url']}"
 
         try:
-            await channel.send(content=content, embed=embed, files=files)
+            await channel.send(
+                content=content,
+                embed=embed,
+                files=files,
+                allowed_mentions=only_ping(*pingable),
+            )
         except discord.HTTPException as exc:
             await self.bot.report_error(
                 f"Failed to send a birthday greeting in #{channel}",
@@ -935,6 +973,31 @@ class Birthdays(commands.Cog):
     @sweep_expired_pins.before_loop
     async def _before_sweep(self) -> None:
         await self.bot.wait_until_ready()
+
+    @announce_birthdays.before_loop
+    async def _before_announce(self) -> None:
+        await self.bot.wait_until_ready()
+
+    # A discord.ext task that raises stops for good — it does not retry. These
+    # two only run daily and every ten minutes, so a silent death would go
+    # unnoticed for a long time. Report it and restart the loop.
+    @announce_birthdays.error
+    async def _announce_failed(self, exc: BaseException) -> None:
+        await self.bot.report_error(
+            "The daily birthday announcement task crashed and was restarted",
+            f"{type(exc).__name__}: {exc}",
+            error=exc,
+        )
+        self.announce_birthdays.restart()
+
+    @sweep_expired_pins.error
+    async def _sweep_failed(self, exc: BaseException) -> None:
+        await self.bot.report_error(
+            "The birthday pin sweep crashed and was restarted",
+            f"{type(exc).__name__}: {exc}",
+            error=exc,
+        )
+        self.sweep_expired_pins.restart()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
