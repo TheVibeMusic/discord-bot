@@ -14,6 +14,7 @@ import datetime
 
 import discord
 import pytest
+from discord.audit_logs import AuditLogEntry
 from unittest.mock import MagicMock
 
 from cogs import moderation
@@ -67,14 +68,15 @@ def make_entry(
     count: int = 1,
     age_seconds: float = 2.0,
 ) -> MagicMock:
-    entry = MagicMock()
+    # spec makes a field real entries lack raise, as it would in production.
+    entry = MagicMock(spec=AuditLogEntry)
     entry.target = MagicMock()
     entry.target.id = target_id
     entry.extra = MagicMock()
     entry.extra.channel = channel
     entry.user = user
     entry.id = entry_id
-    entry.count = count
+    entry.extra.count = count  # discord.py keeps it here, not on the entry
     entry.created_at = datetime.datetime.now(
         datetime.timezone.utc
     ) - datetime.timedelta(seconds=age_seconds)

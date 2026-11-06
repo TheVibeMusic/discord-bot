@@ -31,6 +31,12 @@ INITIAL_EXTENSIONS = [
     "cogs.resources",
 ]
 
+# discord.py holds recent messages in memory, shared across every channel, and
+# a deletion can only be logged with its content while the message is held.
+# The default of 1,000 is outrun quickly in an active server; 10,000 costs
+# about 16 MB for typical chat.
+MESSAGE_CACHE_SIZE = 10_000
+
 
 def allowed_channel(interaction: discord.Interaction) -> bool:
     """Whether this interaction may run where it was invoked.
@@ -115,6 +121,7 @@ class VibeBot(commands.Bot):
             intents=intents,
             help_command=None,
             tree_cls=VibeCommandTree,
+            max_messages=MESSAGE_CACHE_SIZE,
             # Nothing this bot sends should ever ping @everyone or a role by
             # accident. Member-supplied text reaches messages in several
             # features, and per-call allowed_mentions is easy to forget, so the
