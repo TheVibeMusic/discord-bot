@@ -5,6 +5,10 @@ configures a channel where deletions are recorded: single deleted messages
 are logged with their author, content, and whoever removed them, and bulk
 purges are logged as one summary entry (the individual purged messages are
 not logged separately).
+
+A message's content is only available while discord.py still has it cached.
+Deletions of older messages are logged too, with where and when the message
+was posted and whatever the audit log can say about who removed it.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import discord
 from discord.ext import commands
 
 from utils import embeds
-from utils.audit import UNKNOWN, find_message_deleter
+from utils.audit import UNKNOWN, find_message_deleter, find_uncached_deletion
 from utils.permissions import admin_only
 
 log = logging.getLogger("vibe.moderation")
@@ -269,6 +273,77 @@ class Moderation(commands.Cog):
                 str(exc),
                 guild=message.guild,
             )
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(
+        self, payload: discord.RawMessageDeleteEvent
+    ) -> None:
+        """Log deletions of messages that had already left the cache.
+
+        on_message_delete only fires for messages discord.py still holds, so
+        deleting anything older used to leave no record. Those arrive here
+        with just their ids: the entry records where and when the message was
+        posted, and names the author only when the audit log does.
+        """
+        if payload.cached_message is not None or payload.guild_id is None:
+            return  # cached deletions are logged by on_message_delete
+        if payload.message_id in self._purged_ids:
+            self._purged_ids.discard(payload.message_id)
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        log_channel = await self._log_channel(guild)
+        if log_channel is None or log_channel.id == payload.channel_id:
+            return
+
+        entry = await find_uncached_deletion(
+            guild, payload.channel_id, self._audit_cursor
+        )
+        if entry is UNKNOWN:
+            author = "unknown"
+            removed_by = "unknown — I can't read this server's audit log"
+        elif entry is None:
+            author = "unknown"
+            removed_by = "the author (no moderator deletion was recorded)"
+        elif getattr(entry.target, "bot", False):
+            return  # bot messages aren't logged, same as on_message_delete
+        else:
+            author = _describe(entry.target)
+            removed_by = _describe(entry.user)
+
+        posted = int(discord.utils.snowflake_time(payload.message_id).timestamp())
+        embed = embeds.info(
+            "Message deleted",
+            f"**Author:** {author}\n"
+            f"**Deleted by:** {removed_by}\n"
+            f"**Channel:** <#{payload.channel_id}>\n"
+            f"**Posted:** <t:{posted}:f> (<t:{posted}:R>)\n"
+            "**Content:** not available — I no longer had this message in "
+            "memory",
+        )
+        try:
+            await log_channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            await self.bot.report_error(
+                f"Failed to write the deletion log in {guild.name}",
+                str(exc),
+                guild=guild,
+            )
+
+
+def _describe(user: discord.abc.Snowflake | None) -> str:
+    """Format an audit-log user for the deletion log.
+
+    discord.py returns a bare Object for a user it can't resolve (someone who
+    has since left the server, say), which has an id but no name.
+    """
+    if user is None:
+        return "unknown"
+    if isinstance(user, discord.Object):
+        return f"<@{user.id}>"
+    return f"{user.mention} ({user})"
 
 
 async def setup(bot: commands.Bot) -> None:

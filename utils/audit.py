@@ -48,7 +48,7 @@ async def find_message_deleter(
     cursor: dict[int, tuple[int, int]],
     *,
     wait: bool = True,
-) -> discord.abc.User | None:
+) -> discord.abc.User | _Unknown | None:
     """Return the moderator who removed a message, or None for a self-delete.
 
     ``cursor`` is caller-owned state mapping guild id to the last audit entry
@@ -57,10 +57,52 @@ async def find_message_deleter(
     adding a new entry, so a match only counts as fresh when the id or the
     count has changed.
 
-    Returns None when the author deleted their own message, when the bot lacks
-    the View Audit Log permission, or when the lookup fails. Callers that
-    punish on a self-delete should treat a permission failure as "unknown"
-    rather than proof.
+    Returns None when the author deleted their own message, and UNKNOWN when
+    the audit log could not be read (most often a missing View Audit Log
+    permission). Callers that punish on a self-delete must treat UNKNOWN as
+    "can't tell", never as proof.
+    """
+    entry = await _find_delete_entry(
+        message.guild, message.channel.id, message.author.id, cursor, wait=wait
+    )
+    if entry is None or entry is UNKNOWN:
+        return entry
+    return entry.user
+
+
+async def find_uncached_deletion(
+    guild: discord.Guild,
+    channel_id: int,
+    cursor: dict[int, tuple[int, int]],
+    *,
+    wait: bool = True,
+) -> discord.AuditLogEntry | _Unknown | None:
+    """Return the audit entry for a deletion whose message wasn't cached.
+
+    The delete event for an uncached message carries only ids, so the author
+    is unknown and the match can't be narrowed to them. When a moderator was
+    responsible, the entry's ``user`` is the moderator and its ``target`` the
+    author. None means no moderator deletion was recorded, so the author
+    removed it; UNKNOWN means the audit log could not be read.
+
+    ``cursor`` is the same state find_message_deleter uses, so an entry
+    already matched to one deletion is never claimed by another.
+    """
+    return await _find_delete_entry(guild, channel_id, None, cursor, wait=wait)
+
+
+async def _find_delete_entry(
+    guild: discord.Guild,
+    channel_id: int,
+    author_id: int | None,
+    cursor: dict[int, tuple[int, int]],
+    *,
+    wait: bool,
+) -> discord.AuditLogEntry | _Unknown | None:
+    """Return the fresh message_delete entry for a deletion, if there is one.
+
+    ``author_id`` narrows the match to entries targeting that member. None
+    accepts any target, for deletions whose author isn't known.
     """
     if wait:
         await asyncio.sleep(LOOKUP_DELAY_SECONDS)
@@ -68,7 +110,7 @@ async def find_message_deleter(
     try:
         entries = [
             entry
-            async for entry in message.guild.audit_logs(
+            async for entry in guild.audit_logs(
                 limit=LOOKUP_LIMIT,
                 action=discord.AuditLogAction.message_delete,
             )
@@ -77,33 +119,45 @@ async def find_message_deleter(
         log.info(
             "No View Audit Log permission in %s — cannot tell who deleted a "
             "message.",
-            message.guild.name,
+            guild.name,
         )
         return UNKNOWN
     except discord.HTTPException:
         return UNKNOWN
 
-    seen = cursor.get(message.guild.id)
+    seen = cursor.get(guild.id)
     now = datetime.datetime.now(datetime.timezone.utc)
     for entry in entries:
-        if entry.target is None or entry.target.id != message.author.id:
+        if entry.target is None:
+            continue
+        if author_id is not None and entry.target.id != author_id:
             continue
         # Compare channel ids, not objects: when the channel isn't in cache
         # discord.py hands back a bare Object, which never compares equal to a
         # TextChannel even for the same channel.
         entry_channel = getattr(entry.extra, "channel", None)
-        if getattr(entry_channel, "id", None) != message.channel.id:
+        if getattr(entry_channel, "id", None) != channel_id:
             continue
         if (now - entry.created_at).total_seconds() > MAX_AGE_SECONDS:
             continue
-        if seen is not None and entry.id == seen[0] and entry.count <= seen[1]:
+        count = _delete_count(entry)
+        if seen is not None and entry.id == seen[0] and count <= seen[1]:
             continue
-        cursor[message.guild.id] = (entry.id, entry.count)
-        return entry.user
+        cursor[guild.id] = (entry.id, count)
+        return entry
 
     # Prime the cursor to the newest entry even on a self-delete, so the
     # baseline is set for the next lookup in this guild.
     if entries:
         newest = entries[0]
-        cursor[message.guild.id] = (newest.id, newest.count)
+        cursor[guild.id] = (newest.id, _delete_count(newest))
     return None
+
+
+def _delete_count(entry: discord.AuditLogEntry) -> int:
+    """Return how many deletions an entry records.
+
+    The count lives on ``entry.extra``, not on the entry. It is always present
+    for message_delete entries; the default only guards a malformed payload.
+    """
+    return getattr(entry.extra, "count", 1)
